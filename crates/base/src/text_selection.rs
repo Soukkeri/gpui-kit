@@ -1791,6 +1791,37 @@ fn paint_text_selection(state: &Entity<WindowSelectionState>, window: &mut Windo
         if event.button != MouseButton::Left {
             return;
         }
+        // A press outside the client area is the window FRAME: the OS caption,
+        // a resize border, a caption button. Windows delivers those to the
+        // application as ordinary mouse-downs at negative or overflowing client
+        // coordinates (`WM_NCLBUTTONDOWN` becomes a `MouseDownEvent` before
+        // `DefWindowProc` sees the message), and an application cannot refuse
+        // them, because a stopped propagation there is read as "handled" and
+        // would take dragging, minimising, maximising and closing the window
+        // with it. They are not clicks in the document, and treating one as a
+        // press fails twice over.
+        //
+        // It clears the selection: grabbing the titlebar to move the window
+        // throws away whatever the reader had selected, which no other desktop
+        // application does.
+        //
+        // And it begins a gesture that can never end. `DefWindowProc` goes on
+        // to enter the modal move loop, and that loop swallows the release, so
+        // no `MouseUpEvent` is ever dispatched and the mouse-up listener below
+        // never runs. `is_selecting` then stays true for the rest of the
+        // session and every later mouse move extends the selection with no
+        // button held down, painting the document under a bare hover.
+        //
+        // Measured on Windows 11 with a native title bar: the press arrives at
+        // client y = -19 and no mouse-up ever follows it.
+        let viewport = window.viewport_size();
+        if event.position.x < Pixels::ZERO
+            || event.position.y < Pixels::ZERO
+            || event.position.x >= viewport.width
+            || event.position.y >= viewport.height
+        {
+            return;
+        }
         let Some(state) = mouse_down_state.upgrade() else {
             return;
         };

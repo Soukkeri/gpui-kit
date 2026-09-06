@@ -1,8 +1,8 @@
 use crate::{ActiveTheme, Disableable, StyledExt, h_flex};
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, RenderOnce, Role, SharedString, StatefulInteractiveElement as _,
-    StyleRefinement, Styled, Window, prelude::FluentBuilder as _,
+    AnyElement, App, ClickEvent, Div, ElementId, InteractiveElement, IntoElement, MouseButton,
+    ParentElement, RenderOnce, Role, SharedString, Stateful,
+    StatefulInteractiveElement as _, StyleRefinement, Styled, Window, prelude::FluentBuilder as _,
 };
 use smallvec::SmallVec;
 
@@ -92,6 +92,14 @@ impl ParentElement for MenuItemElement {
 
 impl RenderOnce for MenuItemElement {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        self.build(cx)
+    }
+}
+
+impl MenuItemElement {
+    /// The row as a concrete element, so a test can read the style it was
+    /// given; `render` is this behind `impl IntoElement`.
+    pub(crate) fn build(self, cx: &App) -> Stateful<Div> {
         h_flex()
             .id(self.id)
             .role(Role::MenuItem)
@@ -111,10 +119,14 @@ impl RenderOnce for MenuItemElement {
                 this.on_hover(move |hovered, window, cx| (on_hover)(hovered, window, cx))
             })
             .when(!self.disabled, |this| {
-                this.group_hover(self.group_name, |this| {
-                    this.bg(cx.theme().tokens.accent)
-                        .text_color(cx.theme().accent_foreground)
-                })
+                // A row that can be chosen answers a hover with the pointing
+                // hand, the way a button does; a disabled row, a separator and
+                // a label keep the window's arrow.
+                this.cursor_pointer()
+                    .group_hover(self.group_name, |this| {
+                        this.bg(cx.theme().tokens.accent)
+                            .text_color(cx.theme().accent_foreground)
+                    })
                 .when(self.selected, |this| {
                     this.bg(cx.theme().tokens.accent)
                         .text_color(cx.theme().accent_foreground)
@@ -136,11 +148,34 @@ impl RenderOnce for MenuItemElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::CursorStyle;
 
     #[gpui::test]
     fn aria_label_sets_accessible_name(_cx: &mut gpui::TestAppContext) {
         let item = MenuItemElement::new("open", "menu").aria_label("Open");
 
         assert_eq!(item.aria_label, Some("Open".into()));
+    }
+
+    #[gpui::test]
+    fn an_enabled_row_hovers_as_a_pointing_hand(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::theme::init);
+
+        cx.update(|cx| {
+            let mut row = MenuItemElement::new("open", "menu").build(cx);
+
+            assert_eq!(row.style().mouse_cursor, Some(CursorStyle::PointingHand));
+        });
+    }
+
+    #[gpui::test]
+    fn a_disabled_row_keeps_the_window_arrow(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::theme::init);
+
+        cx.update(|cx| {
+            let mut row = MenuItemElement::new("open", "menu").disabled(true).build(cx);
+
+            assert_eq!(row.style().mouse_cursor, None);
+        });
     }
 }

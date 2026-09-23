@@ -280,6 +280,26 @@ impl PopupMenuItem {
     }
 }
 
+/// The app's own sizes for a [`PopupMenu`]'s rows; any left `None` keeps
+/// the menu's [`Size`] default. A submenu inherits what it does not set.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct ItemMetrics {
+    height: Option<Pixels>,
+    text_size: Option<Pixels>,
+    radius: Option<Pixels>,
+}
+
+impl ItemMetrics {
+    /// These metrics, with every one left unset taken from `parent`.
+    fn or(self, parent: ItemMetrics) -> ItemMetrics {
+        ItemMetrics {
+            height: self.height.or(parent.height),
+            text_size: self.text_size.or(parent.text_size),
+            radius: self.radius.or(parent.radius),
+        }
+    }
+}
+
 pub struct PopupMenu {
     pub(crate) focus_handle: FocusHandle,
     pub(crate) menu_items: Vec<PopupMenuItem>,
@@ -295,6 +315,7 @@ pub struct PopupMenu {
     max_height: Option<Pixels>,
     bounds: Bounds<Pixels>,
     size: Size,
+    item_metrics: ItemMetrics,
     check_side: Side,
 
     /// The parent menu of this menu, if this is a submenu
@@ -339,6 +360,7 @@ impl PopupMenu {
             scroll_handle: ScrollHandle::default(),
             external_link_icon: true,
             size: Size::default(),
+            item_metrics: ItemMetrics::default(),
             submenu_anchor: (Anchor::TopLeft, Pixels::ZERO),
             priority: gpui_base::POPUP_PRIORITY,
             _subscriptions: vec![],
@@ -400,6 +422,31 @@ impl PopupMenu {
     /// Set min width of the popup menu, default is 120px
     pub fn min_w(mut self, width: impl Into<Pixels>) -> Self {
         self.min_width = Some(width.into());
+        self
+    }
+
+    /// Set the height of a row, default is 26px (20px for a small menu).
+    ///
+    /// A submenu inherits this unless it sets its own.
+    pub fn item_height(mut self, height: impl Into<Pixels>) -> Self {
+        self.item_metrics.height = Some(height.into());
+        self
+    }
+
+    /// Set the text size of a row, default is the theme's `text_sm`.
+    ///
+    /// A submenu inherits this unless it sets its own.
+    pub fn item_text_size(mut self, size: impl Into<Pixels>) -> Self {
+        self.item_metrics.text_size = Some(size.into());
+        self
+    }
+
+    /// Set the corner radius of a row's hover and selection ground, default
+    /// is the theme radius (half of it for a small menu), at most 8px.
+    ///
+    /// A submenu inherits this unless it sets its own.
+    pub fn item_radius(mut self, radius: impl Into<Pixels>) -> Self {
+        self.item_metrics.radius = Some(radius.into());
         self
     }
 
@@ -1188,10 +1235,15 @@ impl PopupMenu {
             Size::Small => (px(20.), options.radius.half()),
             _ => (px(26.), options.radius),
         };
+        let item_height = self.item_metrics.height.unwrap_or(item_height);
+        let radius = self.item_metrics.radius.unwrap_or(radius);
 
         let this = MenuItemElement::new(ix, &group_name)
             .relative()
-            .text_sm()
+            .map(|this| match self.item_metrics.text_size {
+                Some(size) => this.text_size(size),
+                None => this.text_sm(),
+            })
             .py_0()
             .px(INNER_PADDING)
             .rounded(radius)
@@ -1394,6 +1446,7 @@ impl Render for PopupMenu {
         // navigation treat them the same as `submenu()`-built children.
         let parent = cx.entity().downgrade();
         let parent_priority = self.priority;
+        let parent_metrics = self.item_metrics;
         for item in &self.menu_items {
             if let PopupMenuItem::Submenu { menu, .. } = item {
                 if menu.read(cx).parent_menu.is_none() {
@@ -1401,6 +1454,10 @@ impl Render for PopupMenu {
                         menu.parent_menu = Some(parent.clone());
                         menu.priority = parent_priority + 1;
                     });
+                }
+                let inherited = menu.read(cx).item_metrics.or(parent_metrics);
+                if menu.read(cx).item_metrics != inherited {
+                    menu.update(cx, |menu, _| menu.item_metrics = inherited);
                 }
             }
         }
@@ -1474,6 +1531,68 @@ impl Render for PopupMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_submenu_inherits_only_the_row_metrics_it_leaves_unset() {
+        let parent = ItemMetrics {
+            height: Some(px(28.)),
+            text_size: Some(px(12.)),
+            radius: Some(px(4.)),
+        };
+        assert_eq!(ItemMetrics::default().or(parent), parent);
+        let own = ItemMetrics {
+            height: Some(px(32.)),
+            ..ItemMetrics::default()
+        };
+        assert_eq!(
+            own.or(parent),
+            ItemMetrics {
+                height: Some(px(32.)),
+                ..parent
+            }
+        );
+    }
+
+    #[gpui::test]
+    fn the_app_sizes_a_row_and_the_default_stays_the_librarys(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::theme::init);
+        let row_style = |menu: PopupMenu, cx: &mut gpui::TestAppContext| {
+            let window = cx.add_window(|_, _| menu);
+            window
+                .update(cx, |menu, window, cx| {
+                    let options = RenderOptions {
+                        has_left_icon: false,
+                        check_side: Side::Left,
+                        radius: px(6.),
+                    };
+                    let item = PopupMenuItem::new("Open");
+                    let mut row = menu.render_item(0, &item, options, window, cx).build(cx);
+                    let style = row.style().clone();
+                    (
+                        style.size.height,
+                        style.text.font_size,
+                        style.corner_radii.top_left,
+                    )
+                })
+                .unwrap()
+        };
+
+        let menu = cx.update(|cx| {
+            PopupMenu::new(cx)
+                .item_height(px(28.))
+                .item_text_size(px(12.))
+                .item_radius(px(4.))
+        });
+        let (height, text_size, radius) = row_style(menu, cx);
+        assert_eq!(height, Some(px(28.).into()));
+        assert_eq!(text_size, Some(px(12.).into()));
+        assert_eq!(radius, Some(px(4.).into()));
+
+        let menu = cx.update(|cx| PopupMenu::new(cx));
+        let (height, _, radius) = row_style(menu, cx);
+        assert_eq!(height, Some(px(26.).into()), "the library's default row");
+        assert_eq!(radius, Some(px(6.).into()));
+    }
 
     #[gpui::test]
     fn popup_menu_item_a11y_label_uses_visible_label(cx: &mut gpui::TestAppContext) {

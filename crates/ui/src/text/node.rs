@@ -22,7 +22,7 @@ use crate::{
     text::{
         CodeBlockActionsFn, LinkClickHandlerFn, MarkdownExtensions, MarkdownNode, TableActionsFn,
         document::NodeRenderOptions,
-        inline::{Inline, InlineState},
+        inline::{Inline, InlineCode, InlineState},
         inline_flow::{InlineFlow, InlineFlowItem},
         text_view::handle_link_click,
     },
@@ -1379,6 +1379,33 @@ impl PartialEq for NodeContext {
     }
 }
 
+/// `ranges` sorted, with any that touch or overlap merged into one.
+fn merged_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
+    ranges.sort_by_key(|range| range.start);
+    ranges.dedup_by(|next, kept| {
+        if next.start <= kept.end {
+            kept.end = kept.end.max(next.end);
+            true
+        } else {
+            false
+        }
+    });
+    ranges
+}
+
+/// The inline code of one text run, and how the style draws it.
+fn inline_code(ranges: Vec<Range<usize>>, node_cx: &NodeContext, cx: &App) -> InlineCode {
+    let style = &node_cx.style;
+    InlineCode {
+        ranges: merged_ranges(ranges),
+        font_family: style.inline_code_font_family.clone(),
+        chip: style.inline_code_chip.map(|radius| {
+            let ground = style.inline_code_highlight(cx).background_color;
+            (ground.unwrap_or_else(|| cx.theme().accent), radius)
+        }),
+    }
+}
+
 impl Paragraph {
     fn render(&self, node_cx: &NodeContext, _window: &mut Window, cx: &mut App) -> AnyElement {
         let span = self.span;
@@ -1398,6 +1425,8 @@ impl Paragraph {
         let mut text = String::new();
         let mut highlights: Vec<(Range<usize>, HighlightStyle)> = vec![];
         let mut links: Vec<(Range<usize>, LinkMark)> = vec![];
+        let mut code: Vec<Range<usize>> = vec![];
+        let chip = node_cx.style.inline_code_chip.is_some();
         let mut offset = 0;
 
         let mut ix = 0;
@@ -1418,6 +1447,7 @@ impl Paragraph {
                             highlights.clone(),
                             node_cx.link_click_handler.clone(),
                         )
+                        .code(inline_code(std::mem::take(&mut code), node_cx, cx))
                         .into_any_element(),
                     );
                 }
@@ -1466,6 +1496,7 @@ impl Paragraph {
                 text.clear();
                 links.clear();
                 highlights.clear();
+                code.clear();
                 offset = 0;
             } else {
                 let mut node_highlights = vec![];
@@ -1492,7 +1523,15 @@ impl Paragraph {
                         });
                     }
                     if style.code {
-                        highlight = highlight.highlight(node_cx.style.inline_code_highlight(cx));
+                        let mut code_style = node_cx.style.inline_code_highlight(cx);
+                        if chip {
+                            // The chip paints this ground itself, under the pads too.
+                            code_style.background_color = None;
+                        }
+                        highlight = highlight.highlight(code_style);
+                        if !inner_range.is_empty() {
+                            code.push(inner_range.clone());
+                        }
                     }
                     if let Some(color) = style.highlight {
                         highlight.background_color = Some(color);
@@ -1537,6 +1576,7 @@ impl Paragraph {
                     highlights,
                     node_cx.link_click_handler.clone(),
                 )
+                .code(inline_code(code, node_cx, cx))
                 .into_any_element(),
             );
         }
@@ -2440,6 +2480,13 @@ impl BlockNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn code_ranges_come_out_sorted_and_merged() {
+        assert_eq!(merged_ranges(vec![8..10, 0..2, 1..4]), vec![0..4, 8..10]);
+        assert_eq!(merged_ranges(vec![0..2, 2..3]), vec![0..3], "touching spans are one chip");
+        assert!(merged_ranges(vec![]).is_empty());
+    }
 
     #[test]
     fn reconstruct_markdown_wraps_marked_runs() {

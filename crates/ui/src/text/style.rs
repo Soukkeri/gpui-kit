@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use gpui::{App, FontWeight, HighlightStyle, Pixels, Rems, StyleRefinement, px, rems};
+use gpui::{
+    App, FontWeight, HighlightStyle, Pixels, Rems, SharedString, StyleRefinement, px, rems,
+};
 
 use crate::{ActiveTheme as _, highlighter::HighlightTheme};
 
@@ -49,6 +51,21 @@ pub struct TextViewStyle {
     /// Default is [`HighlightStyle::default()`], the `background_color` will
     /// fallback to `cx.theme().accent`, if it is `None`.
     pub inline_code: HighlightStyle,
+    /// Font family for inline code, default is `None` (the body font).
+    ///
+    /// GPUI shapes a line at one font size, so inline code keeps the body
+    /// size; a face whose x-height is close to the body's reads as the same
+    /// size.
+    pub inline_code_font_family: Option<SharedString>,
+    /// Draw inline code as a chip with this corner radius, default is `None`
+    /// (a flat ground exactly under the glyphs).
+    ///
+    /// A chip pads the span with a narrow no-break space (U+202F) on each
+    /// side and paints the inline code ground as one rounded shape under the
+    /// pads and the code. The pads are display-only: selection and copy never
+    /// see them. Paragraphs that also hold an inline image keep the flat
+    /// ground.
+    pub inline_code_chip: Option<Pixels>,
     pub is_dark: bool,
 }
 
@@ -75,6 +92,8 @@ impl PartialEq for TextViewStyle {
             && self.table == other.table
             && self.table_cell == other.table_cell
             && self.inline_code == other.inline_code
+            && self.inline_code_font_family == other.inline_code_font_family
+            && self.inline_code_chip == other.inline_code_chip
             && self.is_dark == other.is_dark
     }
 }
@@ -92,6 +111,8 @@ impl Default for TextViewStyle {
             table: StyleRefinement::default(),
             table_cell: StyleRefinement::default(),
             inline_code: HighlightStyle::default(),
+            inline_code_font_family: None,
+            inline_code_chip: None,
             is_dark: false,
         }
     }
@@ -136,6 +157,18 @@ impl TextViewStyle {
     /// Set style for inline code spans.
     pub fn inline_code(mut self, style: HighlightStyle) -> Self {
         self.inline_code = style;
+        self
+    }
+
+    /// Set the font family for inline code, e.g. the theme's mono family.
+    pub fn inline_code_font_family(mut self, family: impl Into<SharedString>) -> Self {
+        self.inline_code_font_family = Some(family.into());
+        self
+    }
+
+    /// Draw inline code as a padded chip with this corner radius.
+    pub fn inline_code_chip(mut self, radius: impl Into<Pixels>) -> Self {
+        self.inline_code_chip = Some(radius.into());
         self
     }
 

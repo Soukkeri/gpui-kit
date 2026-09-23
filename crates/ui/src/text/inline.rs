@@ -7,9 +7,9 @@ use std::{
 
 use gpui::{
     App, BorderStyle, Bounds, ClickEvent, CursorStyle, Edges, Element, ElementId, GlobalElementId,
-    Half, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
+    Half, HighlightStyle, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId,
     MouseButton, MouseClickEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
-    SharedString, StyledText, TextLayout, Window, point, px, quad,
+    SharedString, StyledText, TextLayout, TextRun, Window, point, px, quad, size,
 };
 
 use crate::{
@@ -27,13 +27,195 @@ use crate::{
 /// All text in TextView (including the CodeBlock) used this for text rendering.
 pub(super) struct Inline {
     id: ElementId,
+    /// The source text: every offset in `links`, `highlights`, `code` and
+    /// the selection indexes this.
     text: SharedString,
+    /// The text that is laid out: `text` with the code chips' pads.
+    display: SharedString,
+    pads: PadMap,
+    code: InlineCode,
+    font_size: Pixels,
     links: Rc<Vec<(Range<usize>, LinkMark)>>,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     styled_text: StyledText,
     link_click_handler: Option<Arc<LinkClickHandlerFn>>,
 
     state: Arc<Mutex<InlineState>>,
+}
+
+/// The inline code inside an [`Inline`], and how it is drawn.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct InlineCode {
+    /// Byte ranges of the code in the source text.
+    pub(super) ranges: Vec<Range<usize>>,
+    /// The code's font family, `None` keeps the run's own.
+    pub(super) font_family: Option<SharedString>,
+    /// The chip's ground and corner radius, when code is drawn as a chip.
+    pub(super) chip: Option<(Hsla, Pixels)>,
+}
+
+/// A chip is this many ems tall, centred on the line: the code's glyph box
+/// with a little air, and short of a 1.5 line height so two chips on
+/// consecutive lines never touch.
+const CHIP_HEIGHT_EM: f32 = 1.4;
+
+/// The glyph laid out on each side of a chip. A narrow no-break space: GPUI's
+/// line wrapper treats it as part of the word, so a pad never wraps away
+/// from its code.
+const PAD: &str = "\u{202F}";
+
+/// Where the display-only pads sit, as source offsets: a pad is laid out
+/// before the source character at each offset (or at the end, for the text's
+/// length). Sorted, and an offset may repeat.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct PadMap {
+    at: Vec<usize>,
+}
+
+impl PadMap {
+    /// A pad on each side of every range.
+    fn around(ranges: &[Range<usize>]) -> Self {
+        let mut at: Vec<usize> = ranges.iter().flat_map(|r| [r.start, r.end]).collect();
+        at.sort_unstable();
+        Self { at }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.at.is_empty()
+    }
+
+    fn display_text(&self, text: &str) -> String {
+        let mut out = String::with_capacity(text.len() + self.at.len() * PAD.len());
+        let mut last = 0;
+        for &p in &self.at {
+            out.push_str(&text[last..p]);
+            out.push_str(PAD);
+            last = p;
+        }
+        out.push_str(&text[last..]);
+        out
+    }
+
+    /// The display offset of the source character at `ix`.
+    fn to_display(&self, ix: usize) -> usize {
+        ix + PAD.len() * self.at.partition_point(|&p| p <= ix)
+    }
+
+    /// The source offset of display offset `ix`; inside a pad, the character
+    /// the pad stands before.
+    fn to_source(&self, ix: usize) -> usize {
+        let mut shift = 0;
+        for &p in &self.at {
+            let pad_start = p + shift;
+            if ix < pad_start {
+                break;
+            }
+            if ix < pad_start + PAD.len() {
+                return p;
+            }
+            shift += PAD.len();
+        }
+        ix - shift
+    }
+
+    /// The display range a chip covers: the code and its two pads.
+    fn chip_range(&self, range: &Range<usize>) -> Range<usize> {
+        let before = self.at.partition_point(|&p| p < range.start);
+        let through = self.at.partition_point(|&p| p < range.end);
+        range.start + PAD.len() * before..range.end + PAD.len() * (through + 1)
+    }
+
+    /// `runs` over the source text, turned into runs over the display text by
+    /// laying a `pad` run in at every pad.
+    fn insert_pads(&self, runs: Vec<TextRun>, pad: &TextRun) -> Vec<TextRun> {
+        let mut out = Vec::with_capacity(runs.len() + self.at.len() * 2);
+        let mut pads = self.at.iter().peekable();
+        let mut start = 0;
+        for run in split_runs(runs, &self.at) {
+            while pads.next_if(|&&p| p <= start).is_some() {
+                out.push(pad.clone());
+            }
+            start += run.len;
+            out.push(run);
+        }
+        out.extend(pads.map(|_| pad.clone()));
+        out
+    }
+}
+
+/// Splits `runs` so that a run boundary falls at every offset in `cuts`
+/// (sorted).
+fn split_runs(runs: Vec<TextRun>, cuts: &[usize]) -> Vec<TextRun> {
+    let mut out = Vec::with_capacity(runs.len() + cuts.len());
+    let mut cuts = cuts.iter().copied().peekable();
+    let mut start = 0;
+    for run in runs {
+        let end = start + run.len;
+        let mut at = start;
+        while let Some(&cut) = cuts.peek() {
+            if cut >= end {
+                break;
+            }
+            if cut > at {
+                out.push(TextRun {
+                    len: cut - at,
+                    ..run.clone()
+                });
+                at = cut;
+            }
+            cuts.next();
+        }
+        out.push(TextRun {
+            len: end - at,
+            ..run
+        });
+        start = end;
+    }
+    out
+}
+
+/// Sets `family` on every run inside one of `ranges` (sorted, disjoint).
+fn with_font_family(
+    runs: Vec<TextRun>,
+    ranges: &[Range<usize>],
+    family: &SharedString,
+) -> Vec<TextRun> {
+    let cuts: Vec<usize> = ranges.iter().flat_map(|r| [r.start, r.end]).collect();
+    let mut start = 0;
+    split_runs(runs, &cuts)
+        .into_iter()
+        .map(|mut run| {
+            let end = start + run.len;
+            if ranges.iter().any(|r| r.start <= start && end <= r.end) {
+                run.font.family = family.clone();
+            }
+            start = end;
+            run
+        })
+        .collect()
+}
+
+/// One box per visual line that `range` of the laid-out text touches.
+fn line_spans(text: &str, range: Range<usize>, layout: &TextLayout) -> Vec<Bounds<Pixels>> {
+    let line_height = layout.line_height();
+    let mut spans: Vec<Bounds<Pixels>> = Vec::new();
+    let mut ix = range.start;
+    for c in text[range].chars() {
+        let next = ix + c.len_utf8();
+        if let Some(pos) = layout.position_for_index(ix) {
+            let right = layout
+                .position_for_index(next)
+                .filter(|next| next.y == pos.y)
+                .map_or(pos.x + line_height.half(), |next| next.x);
+            let char_bounds = Bounds::from_corners(pos, point(right, pos.y + line_height));
+            match spans.last_mut() {
+                Some(last) if last.origin.y == pos.y => *last = last.union(&char_bounds),
+                _ => spans.push(char_bounds),
+            }
+        }
+        ix = next;
+    }
+    spans
 }
 
 /// The inline text state, used RefCell to keep the selection state.
@@ -70,19 +252,60 @@ impl Inline {
             links: Rc::new(links),
             highlights,
             text: text.clone(),
+            display: text.clone(),
+            pads: PadMap::default(),
+            code: InlineCode::default(),
+            font_size: px(0.),
             styled_text: StyledText::new(text),
             link_click_handler,
             state,
         }
     }
 
+    /// Set the inline code inside this text and how it is drawn.
+    pub(super) fn code(mut self, code: InlineCode) -> Self {
+        if code.chip.is_some() && !code.ranges.is_empty() {
+            self.pads = PadMap::around(&code.ranges);
+            self.display = self.pads.display_text(&self.text).into();
+        }
+        self.code = code;
+        self
+    }
+
+    /// Paint the code chips' grounds, under the glyphs.
+    fn paint_chips(&self, layout: &TextLayout, window: &mut Window) {
+        let Some((color, radius)) = self.code.chip else {
+            return;
+        };
+        let line_height = layout.line_height();
+        let height = (self.font_size * CHIP_HEIGHT_EM).min(line_height);
+        let inset = (line_height - height).half();
+        for range in &self.code.ranges {
+            let range = self.pads.chip_range(range);
+            for span in line_spans(&self.display, range, layout) {
+                window.paint_quad(quad(
+                    Bounds::new(
+                        point(span.left(), span.top() + inset),
+                        size(span.size.width, height),
+                    ),
+                    radius,
+                    color,
+                    Edges::default(),
+                    gpui::transparent_black(),
+                    BorderStyle::default(),
+                ));
+            }
+        }
+    }
+
     /// Get link at given mouse position.
     fn link_for_position(
         layout: &TextLayout,
+        pads: &PadMap,
         links: &Vec<(Range<usize>, LinkMark)>,
         position: Point<Pixels>,
     ) -> Option<LinkMark> {
-        let offset = layout.index_for_position(position).ok()?;
+        let offset = pads.to_source(layout.index_for_position(position).ok()?);
         for (range, link) in links.iter() {
             if range.contains(&offset) {
                 return Some(link.clone());
@@ -132,6 +355,7 @@ impl Inline {
                 true,
                 selection_for_multi_click(
                     &self.text,
+                    &self.pads,
                     text_layout,
                     *bounds,
                     selection.pos,
@@ -172,14 +396,15 @@ impl Inline {
         let mut offset = 0;
         let mut chars = self.text.chars().peekable();
         while let Some(c) = chars.next() {
-            let Some(pos) = text_layout.position_for_index(offset) else {
+            let Some(pos) = text_layout.position_for_index(self.pads.to_display(offset)) else {
                 offset += c.len_utf8();
                 continue;
             };
 
             let next_offset = offset + c.len_utf8();
             let mut char_width = line_height.half();
-            if let Some(next_pos) = text_layout.position_for_index(next_offset) {
+            if let Some(next_pos) = text_layout.position_for_index(self.pads.to_display(next_offset))
+            {
                 if next_pos.y == pos.y {
                     char_width = next_pos.x - pos.x;
                 }
@@ -215,13 +440,14 @@ impl Inline {
 
         for c in self.text.chars() {
             let next_offset = offset + c.len_utf8();
-            let Some(pos) = text_layout.position_for_index(offset) else {
+            let Some(pos) = text_layout.position_for_index(self.pads.to_display(offset)) else {
                 offset = next_offset;
                 continue;
             };
 
             let mut char_width = line_height.half();
-            if let Some(next_pos) = text_layout.position_for_index(next_offset) {
+            if let Some(next_pos) = text_layout.position_for_index(self.pads.to_display(next_offset))
+            {
                 if next_pos.y == pos.y {
                     char_width = next_pos.x - pos.x;
                 }
@@ -256,13 +482,14 @@ impl Inline {
     /// Paint the selection background.
     fn paint_selection(
         selection: &Selection,
+        pads: &PadMap,
         text_layout: &TextLayout,
         bounds: &Bounds<Pixels>,
         window: &mut Window,
         cx: &mut App,
     ) {
-        let mut start = selection.start;
-        let mut end = selection.end;
+        let mut start = pads.to_display(selection.start);
+        let mut end = pads.to_display(selection.end);
         if end < start {
             std::mem::swap(&mut start, &mut end);
         }
@@ -356,6 +583,7 @@ impl Element for Inline {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let text_style = window.text_style();
+        self.font_size = text_style.font_size.to_pixels(window.rem_size());
 
         let mut runs = Vec::new();
         let mut ix = 0;
@@ -369,8 +597,14 @@ impl Element for Inline {
         if ix < self.text.len() {
             runs.push(text_style.to_run(self.text.len() - ix));
         }
+        if let Some(family) = &self.code.font_family {
+            runs = with_font_family(runs, &self.code.ranges, family);
+        }
+        if !self.pads.is_empty() {
+            runs = self.pads.insert_pads(runs, &text_style.to_run(PAD.len()));
+        }
 
-        self.styled_text = StyledText::new(self.text.clone()).with_runs(runs);
+        self.styled_text = StyledText::new(self.display.clone()).with_runs(runs);
         let (layout_id, _) =
             self.styled_text
                 .request_layout(global_element_id, inspector_id, window, cx);
@@ -411,6 +645,7 @@ impl Element for Inline {
         };
 
         let text_layout = self.styled_text.layout().clone();
+        self.paint_chips(&text_layout, window);
         self.styled_text
             .paint(global_id, None, bounds, &mut (), &mut (), window, cx);
 
@@ -426,12 +661,14 @@ impl Element for Inline {
 
         // link cursor pointer
         let mouse_position = window.mouse_position();
-        if let Some(_) = Self::link_for_position(&text_layout, &self.links, mouse_position) {
+        if let Some(_) =
+            Self::link_for_position(&text_layout, &self.pads, &self.links, mouse_position)
+        {
             window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
         }
 
         if let Some(selection) = &state.selection {
-            Self::paint_selection(selection, &text_layout, &bounds, window, cx);
+            Self::paint_selection(selection, &self.pads, &text_layout, &bounds, window, cx);
         }
 
         if is_selectable {
@@ -451,6 +688,7 @@ impl Element for Inline {
                 let text_layout = text_layout.clone();
                 let inline_state = self.state.clone();
                 let text = self.text.clone();
+                let pads = self.pads.clone();
                 let text_view_state = UiGlobalState::global(cx).text_view_state().cloned();
                 move |event: &MouseDownEvent, phase, window, cx| {
                     if !phase.bubble()
@@ -468,6 +706,7 @@ impl Element for Inline {
 
                     let Some(range) = selection_for_multi_click(
                         &text,
+                        &pads,
                         &text_layout,
                         hitbox.bounds,
                         event.position,
@@ -524,6 +763,7 @@ impl Element for Inline {
             // click to open link
             window.on_mouse_event({
                 let links = self.links.clone();
+                let pads = self.pads.clone();
                 let text_layout = text_layout.clone();
                 let hitbox = hitbox.clone();
                 let text_view_state = UiGlobalState::global(cx).text_view_state().cloned();
@@ -541,7 +781,7 @@ impl Element for Inline {
                     }
 
                     if let Some(link) =
-                        Self::link_for_position(&text_layout, &links, event.position)
+                        Self::link_for_position(&text_layout, &pads, &links, event.position)
                     {
                         gpui_base::TextSelection::end(window, cx);
                         cx.stop_propagation();
@@ -565,6 +805,7 @@ impl Element for Inline {
 
 fn selection_for_multi_click(
     text: &str,
+    pads: &PadMap,
     text_layout: &TextLayout,
     bounds: Bounds<Pixels>,
     pos: Point<Pixels>,
@@ -574,7 +815,7 @@ fn selection_for_multi_click(
         return None;
     }
 
-    let offset = text_layout.index_for_position(pos).ok()?;
+    let offset = pads.to_source(text_layout.index_for_position(pos).ok()?);
 
     match kind {
         TextViewMultiClickKind::Word => word_range_at(text, offset),
@@ -630,8 +871,92 @@ fn point_in_text_selection(
 
 #[cfg(test)]
 mod tests {
-    use super::point_in_text_selection;
-    use gpui::{point, px};
+    use super::{PAD, PadMap, point_in_text_selection, split_runs, with_font_family};
+    use gpui::{Hsla, SharedString, TextRun, font, point, px};
+
+    fn run(len: usize) -> TextRun {
+        TextRun {
+            len,
+            font: font("Body"),
+            color: Hsla::default(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }
+    }
+
+    fn lens(runs: &[TextRun]) -> Vec<usize> {
+        runs.iter().map(|run| run.len).collect()
+    }
+
+    #[test]
+    fn pads_sit_on_each_side_of_the_code_and_map_both_ways() {
+        // "use `x` here": the code is `x` at 4..5.
+        let text = "use x here";
+        let pads = PadMap::around(&[4..5]);
+        let display = pads.display_text(text);
+        assert_eq!(display, format!("use {PAD}x{PAD} here"));
+
+        // Every source character keeps its own glyph in the display text.
+        for (ix, c) in text.char_indices() {
+            let at = pads.to_display(ix);
+            assert_eq!(display[at..].chars().next(), Some(c), "char {ix}");
+            assert_eq!(pads.to_source(at), ix, "round trip {ix}");
+        }
+        assert_eq!(pads.to_display(text.len()), display.len());
+
+        // A point inside a pad is the character the pad stands before.
+        assert_eq!(pads.to_source(4 + 1), 4);
+        assert_eq!(pads.to_source(4 + PAD.len() + 1 + 1), 5);
+
+        // The chip covers the pads and the code, nothing else.
+        let chip = pads.chip_range(&(4..5));
+        assert_eq!(&display[chip], format!("{PAD}x{PAD}"));
+    }
+
+    #[test]
+    fn pads_hold_for_code_at_both_ends_and_several_spans() {
+        let text = "ab cd";
+        let pads = PadMap::around(&[0..2, 3..5]);
+        let display = pads.display_text(text);
+        assert_eq!(display, format!("{PAD}ab{PAD} {PAD}cd{PAD}"));
+        assert_eq!(&display[pads.chip_range(&(0..2))], format!("{PAD}ab{PAD}"));
+        assert_eq!(&display[pads.chip_range(&(3..5))], format!("{PAD}cd{PAD}"));
+        for (ix, _) in text.char_indices() {
+            assert_eq!(pads.to_source(pads.to_display(ix)), ix);
+        }
+    }
+
+    #[test]
+    fn runs_split_at_every_cut_and_keep_their_total() {
+        let runs = split_runs(vec![run(4), run(6)], &[0, 2, 4, 7, 10]);
+        assert_eq!(lens(&runs), vec![2, 2, 3, 3]);
+    }
+
+    #[test]
+    fn the_code_font_lands_on_the_code_runs_only() {
+        let family = SharedString::from("Mono");
+        let runs = with_font_family(vec![run(10)], &[4..5], &family);
+        assert_eq!(lens(&runs), vec![4, 1, 5]);
+        let families: Vec<&str> = runs.iter().map(|run| run.font.family.as_ref()).collect();
+        assert_eq!(families, vec!["Body", "Mono", "Body"]);
+    }
+
+    #[test]
+    fn pad_runs_cover_the_display_text() {
+        let text = "use x here";
+        let pads = PadMap::around(&[4..5]);
+        let pad = run(PAD.len());
+        let runs = pads.insert_pads(vec![run(text.len())], &pad);
+        assert_eq!(lens(&runs), vec![4, PAD.len(), 1, PAD.len(), 5]);
+        let total: usize = runs.iter().map(|run| run.len).sum();
+        assert_eq!(total, pads.display_text(text).len());
+
+        // A pad at the very end is laid in after the last run.
+        let pads = PadMap::around(&[3..5]);
+        let runs = pads.insert_pads(vec![run(5)], &pad);
+        assert_eq!(lens(&runs), vec![3, PAD.len(), 2, PAD.len()]);
+    }
 
     #[test]
     fn test_point_in_text_selection() {

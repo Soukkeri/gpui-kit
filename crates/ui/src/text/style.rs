@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use gpui::{App, HighlightStyle, Pixels, Rems, StyleRefinement, px, rems};
+use gpui::{App, FontWeight, HighlightStyle, Pixels, Rems, StyleRefinement, px, rems};
 
 use crate::{ActiveTheme as _, highlighter::HighlightTheme};
 
@@ -16,6 +16,15 @@ pub struct TextViewStyle {
     /// The first parameter is the heading level (1-6), the second parameter is the base font size.
     /// The second parameter is the base font size.
     pub heading_font_size: Option<Arc<dyn Fn(u8, Pixels) -> Pixels + Send + Sync + 'static>>,
+    /// Function to pick the font weight of a heading by its level (1-6).
+    ///
+    /// Default is `None`: bold for H1, semibold for H2-H5, medium for H6.
+    pub heading_font_weight: Option<Arc<dyn Fn(u8) -> FontWeight + Send + Sync + 'static>>,
+    /// Space above a heading that is not the first block, default is 0.
+    ///
+    /// The gap below a heading stays 0.3 rem, so a gap here ties the heading
+    /// to the text it introduces rather than to the text above it.
+    pub heading_gap_above: Rems,
     /// Highlight theme for code blocks. Default: [`HighlightTheme::default_light()`]
     pub highlight_theme: Arc<HighlightTheme>,
     /// The style refinement for code blocks.
@@ -55,6 +64,12 @@ impl PartialEq for TextViewStyle {
                 (None, None) => true,
                 _ => false,
             }
+            && match (&self.heading_font_weight, &other.heading_font_weight) {
+                (Some(left), Some(right)) => (1..=6).all(|level| left(level) == right(level)),
+                (None, None) => true,
+                _ => false,
+            }
+            && self.heading_gap_above == other.heading_gap_above
             && self.highlight_theme == other.highlight_theme
             && self.code_block == other.code_block
             && self.table == other.table
@@ -70,6 +85,8 @@ impl Default for TextViewStyle {
             paragraph_gap: rems(1.),
             heading_base_font_size: px(14.),
             heading_font_size: None,
+            heading_font_weight: None,
+            heading_gap_above: rems(0.),
             highlight_theme: HighlightTheme::default_light().clone(),
             code_block: StyleRefinement::default(),
             table: StyleRefinement::default(),
@@ -92,6 +109,21 @@ impl TextViewStyle {
         F: Fn(u8, Pixels) -> Pixels + Send + Sync + 'static,
     {
         self.heading_font_size = Some(Arc::new(f));
+        self
+    }
+
+    /// Set the font weight of a heading by its level (1-6).
+    pub fn heading_font_weight<F>(mut self, f: F) -> Self
+    where
+        F: Fn(u8) -> FontWeight + Send + Sync + 'static,
+    {
+        self.heading_font_weight = Some(Arc::new(f));
+        self
+    }
+
+    /// Set the space above a heading that is not the first block, default is 0.
+    pub fn heading_gap_above(mut self, gap: Rems) -> Self {
+        self.heading_gap_above = gap;
         self
     }
 
@@ -156,6 +188,17 @@ mod tests {
         let mut dark = base.clone();
         dark.is_dark = true;
         assert!(base != dark);
+    }
+
+    #[test]
+    fn heading_weight_and_gap_take_part_in_the_fingerprint() {
+        let base = TextViewStyle::default();
+        let semibold = base.clone().heading_font_weight(|_| FontWeight::SEMIBOLD);
+        assert!(semibold == base.clone().heading_font_weight(|_| FontWeight::SEMIBOLD));
+        assert!(semibold != base.clone().heading_font_weight(|_| FontWeight::BOLD));
+        assert!(semibold != base);
+        assert!(base != base.clone().heading_gap_above(rems(0.75)));
+        assert_eq!(base.heading_gap_above, rems(0.), "no gap unless asked");
     }
 
     #[test]

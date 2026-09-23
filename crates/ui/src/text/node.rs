@@ -2338,9 +2338,16 @@ impl BlockNode {
                 if let Some(f) = node_cx.style.heading_font_size.as_ref() {
                     text_size = (f)(*level, node_cx.style.heading_base_font_size);
                 }
+                let font_weight = node_cx
+                    .style
+                    .heading_font_weight
+                    .as_ref()
+                    .map_or(font_weight, |f| (f)(*level));
+                let gap_above = node_cx.style.heading_gap_above;
 
                 div()
                     .id(SharedString::from(format!("h{}-{}", level, ix)))
+                    .when(ix > 0 && gap_above.0 > 0., |this| this.pt(gap_above))
                     .pb(rems(0.3))
                     .whitespace_normal()
                     .text_size(text_size)

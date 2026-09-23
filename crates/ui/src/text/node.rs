@@ -8,7 +8,7 @@ use std::{
 use gpui::{
     AnyElement, App, DefiniteLength, Div, ElementId, FontStyle, FontWeight, Half, HighlightStyle,
     Hsla, InteractiveElement as _, IntoElement, Length, ObjectFit, Overflow, ParentElement,
-    Pixels, Rems, ScrollHandle, SharedString, SharedUri, Stateful, StatefulInteractiveElement,
+    Pixels, ScrollHandle, SharedString, SharedUri, Stateful, StatefulInteractiveElement,
     Styled, StyledImage as _,
     WhiteSpace, Window, div, img, prelude::FluentBuilder as _, px, relative, rems,
 };
@@ -1414,12 +1414,6 @@ fn table_row(
         .children(cells)
 }
 
-/// A list's marker column: at least the indent, and never narrower than
-/// the widest marker, rounded up to a whole pixel so it cannot wrap.
-fn marker_column(indent: Pixels, widest_marker: Pixels) -> Pixels {
-    indent.max(widest_marker.ceil())
-}
-
 /// Where a list item's continuation blocks and nested lists start: the
 /// marker column when the list has one, else the old 1 rem.
 fn text_column(options: NodeRenderOptions) -> DefiniteLength {
@@ -2020,13 +2014,12 @@ impl BlockNode {
             .child(div().flex_1().min_w_0().overflow_hidden().child(content))
     }
 
-    /// The width of a list's marker column: the indent, or the widest
-    /// marker of its items when that is wider.
+    /// The width of a list's marker column: its widest marker, rounded up to
+    /// a whole pixel so a marker never wraps.
     fn list_marker_width(
         children: &[BlockNode],
         ordered: bool,
         depth: usize,
-        indent: Rems,
         window: &mut Window,
     ) -> Pixels {
         let text_style = window.text_style();
@@ -2052,7 +2045,7 @@ impl BlockNode {
                 .width;
             widest = widest.max(width);
         }
-        marker_column(indent.to_pixels(rem_size), widest)
+        widest.ceil()
     }
 
     fn render_list_item(
@@ -2580,9 +2573,11 @@ impl BlockNode {
                 .w_full()
                 .min_w_0()
                 .pb(mb)
+                // The list's own inset, before its marker column.
+                .when_some(node_cx.style.list_indent, |this, indent| this.pl(indent))
                 .children({
-                    let marker_width = node_cx.style.list_indent.map(|indent| {
-                        Self::list_marker_width(children, *ordered, options.depth, indent, window)
+                    let marker_width = node_cx.style.list_indent.map(|_| {
+                        Self::list_marker_width(children, *ordered, options.depth, window)
                     });
                     let mut items = Vec::with_capacity(children.len());
                     let mut item_index = 0;
@@ -2671,12 +2666,6 @@ mod tests {
         // Empty, out of bounds and off-boundary ranges are dropped.
         let out = overlay_matches(vec![], "é", vec![0..0, 0..5, 0..1], find);
         assert!(out.is_empty());
-    }
-
-    #[test]
-    fn a_marker_column_is_the_indent_until_a_marker_is_wider() {
-        assert_eq!(marker_column(px(20.), px(9.5)), px(20.));
-        assert_eq!(marker_column(px(20.), px(24.2)), px(25.), "whole pixels, never narrower");
     }
 
     #[test]

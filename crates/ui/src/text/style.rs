@@ -71,13 +71,14 @@ pub struct TextViewStyle {
     /// see them. Paragraphs that also hold an inline image keep the flat
     /// ground.
     pub inline_code_chip: Option<Pixels>,
-    /// Indent lists into a marker column, default is `None` (the marker sits
-    /// flush with the text edge and each item's text starts after it).
+    /// Indent lists and give them a marker column, default is `None` (the
+    /// marker sits flush with the text edge and each item's text starts
+    /// after it).
     ///
-    /// With an indent, every item of a list puts its marker right-aligned in
-    /// one column, so "9." and "10." end at the same x and the text of every
-    /// item starts at the same x, with wrapped lines hanging under it. The
-    /// column is the indent, or the widest marker when that is wider.
+    /// With an indent, a list is inset by it, and every item of the list
+    /// puts its marker right-aligned in one column as wide as the list's
+    /// widest marker, so "9." and "10." end at the same x and the text of
+    /// every item starts at the same x, with wrapped lines hanging under it.
     pub list_indent: Option<Rems>,
     pub is_dark: bool,
 }
@@ -191,7 +192,7 @@ impl TextViewStyle {
         self
     }
 
-    /// Indent lists into a right-aligned marker column at least this wide.
+    /// Inset lists by this much, before a right-aligned marker column.
     pub fn list_indent(mut self, indent: Rems) -> Self {
         self.list_indent = Some(indent);
         self

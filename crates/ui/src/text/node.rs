@@ -1496,11 +1496,23 @@ impl Paragraph {
                     );
                 }
                 let link_click_handler = node_cx.link_click_handler.clone();
+                let alt = image.alt.clone().filter(|alt| !alt.is_empty());
+                let alt_color = cx.theme().muted_foreground;
+                let base = node_cx.markdown_extensions.image_base();
                 child_nodes.push(
-                    img(image_source(&image.url))
+                    img(image_source(&image.url, base))
                         .id(ix)
                         .object_fit(ObjectFit::Contain)
                         .max_w(relative(1.))
+                        // An image that cannot be loaded says what it was.
+                        .when_some(alt, |this, alt| {
+                            this.with_fallback(move || {
+                                div()
+                                    .text_color(alt_color)
+                                    .child(alt.clone())
+                                    .into_any_element()
+                            })
+                        })
                         .when_some(image.width, |this, width| this.w(width))
                         .when_some(image.link.clone(), |this, link| {
                             let title = image.title();
@@ -1662,7 +1674,7 @@ impl Paragraph {
                 }
 
                 items.push(InlineFlowItem::Image {
-                    url: image.url.clone(),
+                    source: image_source(&image.url, node_cx.markdown_extensions.image_base()),
                     link: image.link.clone(),
                     title: image.title(),
                     width: image.width,

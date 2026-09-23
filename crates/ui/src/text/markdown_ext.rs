@@ -2,6 +2,7 @@ use std::{
     any::Any,
     collections::HashMap,
     fmt,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -179,9 +180,55 @@ pub struct MarkdownExtensions {
     block_parsers: Vec<Arc<MarkdownBlockParserFn>>,
     block_renderers: HashMap<SharedString, Arc<MarkdownBlockRenderFn>>,
     revision: u64,
+    /// Compared by value, not by `revision`, so a view that rebuilds its
+    /// extensions every frame does not re-parse every frame.
+    join_soft_breaks: bool,
+    image_base_dir: Option<Arc<Path>>,
 }
 
 impl MarkdownExtensions {
+    /// Join soft line breaks into spaces, the way GitHub and VS Code render a
+    /// Markdown file: a paragraph hard-wrapped in the source flows as one
+    /// paragraph. A hard break (two trailing spaces or a backslash) still
+    /// breaks the line.
+    ///
+    /// Without this a soft break keeps its newline, which is what a chat
+    /// message wants: its author pressed Enter there.
+    pub fn join_soft_breaks(mut self) -> Self {
+        self.join_soft_breaks = true;
+        self
+    }
+
+    /// Resolve relative image URLs against `dir`, the folder of the Markdown
+    /// file on screen, and load them from disk.
+    ///
+    /// Only a plain relative path is resolved (no scheme, no root, no drive,
+    /// no UNC prefix); everything else keeps the old URI behaviour. Without a
+    /// base directory, no document URL ever reaches the file system.
+    pub fn image_base_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.image_base_dir = Some(dir.into().into());
+        self
+    }
+
+    pub(crate) fn joins_soft_breaks(&self) -> bool {
+        self.join_soft_breaks
+    }
+
+    pub(crate) fn image_base(&self) -> Option<&Path> {
+        self.image_base_dir.as_deref()
+    }
+
+    /// Whether moving from `self` to `other` changes what a parse produces.
+    pub(crate) fn parses_differently(&self, other: &Self) -> bool {
+        self.revision != other.revision || self.join_soft_breaks != other.join_soft_breaks
+    }
+
+    /// Whether moving from `self` to `other` changes only what a render
+    /// produces.
+    pub(crate) fn renders_differently(&self, other: &Self) -> bool {
+        self.image_base_dir != other.image_base_dir
+    }
+
     /// Enable MDX JSX/expression constructs.
     ///
     /// This disables raw HTML constructs because `markdown-rs` gives HTML
@@ -233,10 +280,6 @@ impl MarkdownExtensions {
         } else {
             panic!("inline Markdown plugins are not supported by TextView yet")
         }
-    }
-
-    pub(crate) fn revision(&self) -> u64 {
-        self.revision
     }
 
     pub(crate) fn push_block_parser<F>(&mut self, parser: F)
@@ -301,5 +344,27 @@ impl MarkdownExtensions {
 
     fn bump_revision(&mut self) {
         self.revision = MARKDOWN_EXTENSIONS_REVISION.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MarkdownExtensions;
+
+    #[test]
+    fn preview_options_rebuilt_every_frame_do_not_reparse_every_frame() {
+        let preview = || {
+            MarkdownExtensions::default()
+                .join_soft_breaks()
+                .image_base_dir("repo")
+        };
+        assert!(!preview().parses_differently(&preview()));
+        assert!(!preview().renders_differently(&preview()));
+
+        let plain = MarkdownExtensions::default();
+        assert!(plain.parses_differently(&plain.clone().join_soft_breaks()));
+        assert!(!plain.parses_differently(&plain.clone().image_base_dir("repo")));
+        assert!(plain.renders_differently(&plain.clone().image_base_dir("repo")));
+        assert!(preview().renders_differently(&preview().image_base_dir("other")));
     }
 }

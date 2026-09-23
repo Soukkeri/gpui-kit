@@ -256,6 +256,22 @@ impl TextView {
         self
     }
 
+    /// Join soft line breaks into spaces, the way a Markdown file is
+    /// rendered; see [`MarkdownExtensions::join_soft_breaks`].
+    pub fn markdown_join_soft_breaks(mut self) -> Self {
+        let extensions = Arc::make_mut(&mut self.markdown_extensions);
+        *extensions = extensions.clone().join_soft_breaks();
+        self
+    }
+
+    /// Resolve relative image URLs against `dir`, the Markdown file's folder;
+    /// see [`MarkdownExtensions::image_base_dir`].
+    pub fn markdown_image_base_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        let extensions = Arc::make_mut(&mut self.markdown_extensions);
+        *extensions = extensions.clone().image_base_dir(dir);
+        self
+    }
+
     /// Register a custom block-level Markdown parser.
     ///
     /// The parser runs during Markdown AST conversion and must be independent

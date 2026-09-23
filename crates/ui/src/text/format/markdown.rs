@@ -154,6 +154,33 @@ fn append_inline_html_blocks(paragraph: &mut Paragraph, blocks: Vec<BlockNode>) 
     Some(text)
 }
 
+/// `text` with every soft line break turned into one space, the way a
+/// browser flows a paragraph: the whitespace around the break goes too.
+fn joined_soft_breaks(text: &str) -> String {
+    if !text.contains('\n') {
+        return text.to_string();
+    }
+    let lines: Vec<&str> = text.split('\n').collect();
+    let last = lines.len() - 1;
+    lines
+        .iter()
+        .enumerate()
+        .map(|(ix, line)| {
+            let line = if ix > 0 {
+                line.trim_start_matches([' ', '\t'])
+            } else {
+                line
+            };
+            if ix < last {
+                line.trim_end_matches([' ', '\t', '\r'])
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn parse_paragraph(paragraph: &mut Paragraph, node: &mdast::Node, cx: &mut NodeContext) -> String {
     let span = node.position().map(|pos| Span {
         start: cx.offset + pos.start.offset,
@@ -172,8 +199,18 @@ fn parse_paragraph(paragraph: &mut Paragraph, node: &mdast::Node, cx: &mut NodeC
             });
         }
         Node::Text(val) => {
-            text = val.value.clone();
-            paragraph.push_str(&val.value)
+            text = if cx.markdown_extensions.joins_soft_breaks() {
+                joined_soft_breaks(&val.value)
+            } else {
+                val.value.clone()
+            };
+            paragraph.push_str(&text)
+        }
+        Node::Break(_) => {
+            // A hard break (two trailing spaces or a backslash) is a line
+            // break in every mode.
+            text = "\n".to_string();
+            paragraph.push_str(&text)
         }
         Node::Emphasis(val) => {
             text = merge_children_with_mark(
@@ -513,6 +550,60 @@ mod tests {
     use gpui::ParentElement;
 
     use crate::text::{MarkdownExtensions, MarkdownNode, MarkdownPlugin};
+
+    fn paragraph_text(markdown: &str, extensions: MarkdownExtensions) -> String {
+        let mut cx = NodeContext {
+            markdown_extensions: extensions.into(),
+            ..NodeContext::default()
+        };
+        let document = parse(markdown, &mut cx).unwrap();
+        let BlockNode::Paragraph(paragraph) = &document.blocks[0] else {
+            panic!("expected paragraph");
+        };
+        paragraph.children.iter().map(|child| child.text.to_string()).collect()
+    }
+
+    #[test]
+    fn a_hard_break_is_a_line_break_in_every_mode() {
+        let source = "first\\\nsecond  \nthird";
+        assert_eq!(
+            paragraph_text(source, MarkdownExtensions::default()),
+            "first\nsecond\nthird"
+        );
+        assert_eq!(
+            paragraph_text(source, MarkdownExtensions::default().join_soft_breaks()),
+            "first\nsecond\nthird"
+        );
+    }
+
+    #[test]
+    fn soft_breaks_keep_their_newline_unless_the_view_joins_them() {
+        let source = "The intro was\nhard-wrapped at\n  eighty columns.";
+        assert_eq!(
+            paragraph_text(source, MarkdownExtensions::default()),
+            "The intro was\nhard-wrapped at\neighty columns."
+        );
+        assert_eq!(
+            paragraph_text(source, MarkdownExtensions::default().join_soft_breaks()),
+            "The intro was hard-wrapped at eighty columns."
+        );
+        assert_eq!(
+            paragraph_text(
+                "Windows\r\nline ends *and* marks\r\njoin too.",
+                MarkdownExtensions::default().join_soft_breaks()
+            ),
+            "Windows line ends and marks join too."
+        );
+    }
+
+    #[test]
+    fn joining_soft_breaks_trims_the_whitespace_around_them() {
+        assert_eq!(joined_soft_breaks("a \n  b"), "a b");
+        assert_eq!(joined_soft_breaks("a\r\n\tb"), "a b");
+        assert_eq!(joined_soft_breaks("\nnext"), " next");
+        assert_eq!(joined_soft_breaks("before\n"), "before ");
+        assert_eq!(joined_soft_breaks("no break"), "no break");
+    }
 
     #[test]
     fn test_nested_emphasis_merges_text_marks() {

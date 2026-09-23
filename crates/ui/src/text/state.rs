@@ -270,14 +270,23 @@ impl TextViewState {
         markdown_extensions: Arc<MarkdownExtensions>,
         cx: &mut Context<Self>,
     ) {
-        if self.markdown_extensions.revision() == markdown_extensions.revision() {
+        let reparse = self
+            .markdown_extensions
+            .parses_differently(&markdown_extensions);
+        if !reparse
+            && !self
+                .markdown_extensions
+                .renders_differently(&markdown_extensions)
+        {
             return;
         }
 
         self.markdown_extensions = markdown_extensions;
-        if self.format == TextViewFormat::Markdown {
+        if reparse && self.format == TextViewFormat::Markdown {
             let text = self.text.clone();
             self.increment_update(&text, false, cx);
+        } else {
+            cx.notify();
         }
     }
 

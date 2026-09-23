@@ -1,6 +1,6 @@
 use gpui::{
-    App, InteractiveElement as _, IntoElement, ListState, ParentElement as _, SharedString,
-    Styled as _, Window, div,
+    App, InteractiveElement as _, IntoElement, ListState, ParentElement as _, Pixels,
+    SharedString, Styled as _, Window, div,
 };
 
 use std::{ops::RangeInclusive, sync::Arc};
@@ -25,6 +25,9 @@ pub(crate) struct NodeRenderOptions {
     pub(crate) ordered: bool,
     pub(crate) depth: usize,
     pub(crate) is_last: bool,
+    /// The width of the enclosing list's marker column, when the style asks
+    /// for one (`TextViewStyle::list_indent`).
+    pub(crate) marker_width: Option<Pixels>,
 }
 
 impl NodeRenderOptions {

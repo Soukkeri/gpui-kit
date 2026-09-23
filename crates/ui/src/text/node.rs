@@ -8,7 +8,8 @@ use std::{
 use gpui::{
     AnyElement, App, DefiniteLength, Div, ElementId, FontStyle, FontWeight, Half, HighlightStyle,
     Hsla, InteractiveElement as _, IntoElement, Length, ObjectFit, Overflow, ParentElement,
-    ScrollHandle, SharedString, SharedUri, StatefulInteractiveElement, Styled, StyledImage as _,
+    Pixels, Rems, ScrollHandle, SharedString, SharedUri, StatefulInteractiveElement, Styled,
+    StyledImage as _,
     WhiteSpace, Window, div, img, prelude::FluentBuilder as _, px, relative, rems,
 };
 use markdown::mdast;
@@ -1379,6 +1380,21 @@ impl PartialEq for NodeContext {
     }
 }
 
+/// A list's marker column: at least the indent, and never narrower than
+/// the widest marker, rounded up to a whole pixel so it cannot wrap.
+fn marker_column(indent: Pixels, widest_marker: Pixels) -> Pixels {
+    indent.max(widest_marker.ceil())
+}
+
+/// Where a list item's continuation blocks and nested lists start: the
+/// marker column when the list has one, else the old 1 rem.
+fn text_column(options: NodeRenderOptions) -> DefiniteLength {
+    match options.marker_width {
+        Some(width) => width.into(),
+        None => rems(1.).into(),
+    }
+}
+
 /// `ranges` sorted, with any that touch or overlap merged into one.
 fn merged_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
     ranges.sort_by_key(|range| range.start);
@@ -1856,6 +1872,28 @@ impl BlockNode {
         checked: Option<bool>,
         cx: &mut App,
     ) -> Div {
+        let marker = (!options.todo && checked.is_none())
+            .then(|| list_item_prefix(ix, options.ordered, options.depth));
+        let checkbox = checked.map(|checked| {
+            // Todo list checkbox
+            div()
+                .flex()
+                .flex_none()
+                .mt(rems(0.4))
+                .mr_1p5()
+                .size(rems(0.875))
+                .items_center()
+                .justify_center()
+                .rounded(cx.theme().radius.half())
+                .border_1()
+                .border_color(cx.theme().primary)
+                .text_color(cx.theme().primary_foreground)
+                .when(checked, |this| {
+                    this.bg(cx.theme().tokens.primary)
+                        .child(Icon::new(IconName::Check).size_2().text_xs())
+                })
+        });
+
         h_flex()
             .w_full()
             .flex_1()
@@ -1863,30 +1901,55 @@ impl BlockNode {
             .relative()
             .items_start()
             .content_start()
-            .when(!options.todo && checked.is_none(), |this| {
-                this.child(list_item_prefix(ix, options.ordered, options.depth))
-            })
-            .when_some(checked, |this, checked| {
-                // Todo list checkbox
-                this.child(
-                    div()
-                        .flex()
-                        .mt(rems(0.4))
-                        .mr_1p5()
-                        .size(rems(0.875))
-                        .items_center()
-                        .justify_center()
-                        .rounded(cx.theme().radius.half())
-                        .border_1()
-                        .border_color(cx.theme().primary)
-                        .text_color(cx.theme().primary_foreground)
-                        .when(checked, |this| {
-                            this.bg(cx.theme().tokens.primary)
-                                .child(Icon::new(IconName::Check).size_2().text_xs())
-                        }),
-                )
+            .map(|this| match options.marker_width {
+                // The marker column: every item's marker ends at the same x.
+                Some(width) => this.child(
+                    h_flex()
+                        .flex_none()
+                        .w(width)
+                        .justify_end()
+                        .whitespace_nowrap()
+                        .children(marker)
+                        .children(checkbox),
+                ),
+                None => this.children(marker).children(checkbox),
             })
             .child(div().flex_1().min_w_0().overflow_hidden().child(content))
+    }
+
+    /// The width of a list's marker column: the indent, or the widest
+    /// marker of its items when that is wider.
+    fn list_marker_width(
+        children: &[BlockNode],
+        ordered: bool,
+        depth: usize,
+        indent: Rems,
+        window: &mut Window,
+    ) -> Pixels {
+        let text_style = window.text_style();
+        let rem_size = window.rem_size();
+        let font_size = text_style.font_size.to_pixels(rem_size);
+        let items = children.iter().filter(|child| child.is_list_item()).count();
+        let has_checkbox = children
+            .iter()
+            .any(|child| matches!(child, BlockNode::ListItem { checked: Some(_), .. }));
+
+        let mut widest = if has_checkbox {
+            // The checkbox and its right margin.
+            rems(0.875 + 0.375).to_pixels(rem_size)
+        } else {
+            px(0.)
+        };
+        let samples = if ordered { items } else { items.min(1) };
+        for ix in 0..samples {
+            let prefix = list_item_prefix(ix, ordered, depth);
+            let width = window
+                .text_system()
+                .layout_line(&prefix, font_size, &[text_style.to_run(prefix.len())], None)
+                .width;
+            widest = widest.max(width);
+        }
+        marker_column(indent.to_pixels(rem_size), widest)
     }
 
     fn render_list_item(
@@ -1938,7 +2001,7 @@ impl BlockNode {
                                             v_flex().child(preceding_row).child(
                                                 div()
                                                     .w_full()
-                                                    .pl(rems(1.))
+                                                    .pl(text_column(options))
                                                     .overflow_hidden()
                                                     .child(text),
                                             ),
@@ -1952,7 +2015,7 @@ impl BlockNode {
                                 ));
                             }
                             BlockNode::List { .. } => {
-                                items.push(div().ml(rems(1.)).child(child.render_block(
+                                items.push(div().ml(text_column(options)).child(child.render_block(
                                     NodeRenderOptions {
                                         depth: options.depth + 1,
                                         todo: checked.is_some(),
@@ -1995,7 +2058,7 @@ impl BlockNode {
                                         div()
                                             .w_full()
                                             .min_w_0()
-                                            .pl(rems(1.))
+                                            .pl(text_column(options))
                                             .overflow_hidden()
                                             .child(block),
                                     );
@@ -2423,6 +2486,9 @@ impl BlockNode {
                 .min_w_0()
                 .pb(mb)
                 .children({
+                    let marker_width = node_cx.style.list_indent.map(|indent| {
+                        Self::list_marker_width(children, *ordered, options.depth, indent, window)
+                    });
                     let mut items = Vec::with_capacity(children.len());
                     let mut item_index = 0;
                     for (ix, item) in children.into_iter().enumerate() {
@@ -2434,6 +2500,7 @@ impl BlockNode {
                             NodeRenderOptions {
                                 ix,
                                 ordered: *ordered,
+                                marker_width,
                                 ..options
                             },
                             node_cx,
@@ -2480,6 +2547,12 @@ impl BlockNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_marker_column_is_the_indent_until_a_marker_is_wider() {
+        assert_eq!(marker_column(px(20.), px(9.5)), px(20.));
+        assert_eq!(marker_column(px(20.), px(24.2)), px(25.), "whole pixels, never narrower");
+    }
 
     #[test]
     fn code_ranges_come_out_sorted_and_merged() {

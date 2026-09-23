@@ -21,7 +21,8 @@ use crate::{
     input::{InputEdit, Point, RopeExt as _},
     scroll::horizontal_scroll_area,
     text::{
-        CodeBlockActionsFn, LinkClickHandlerFn, MarkdownExtensions, MarkdownNode, TableActionsFn,
+        CodeBlockActionsFn, LinkClickHandlerFn, MarkdownExtensions, MarkdownNode, MatchHighlights,
+        TableActionsFn,
         document::NodeRenderOptions,
         inline::{Inline, InlineCode, InlineState},
         inline_flow::{InlineFlow, InlineFlowItem},
@@ -1332,7 +1333,11 @@ impl CodeBlock {
                         "code",
                         self.state.clone(),
                         vec![],
-                        self.styles(&cx.theme().highlight_theme),
+                        with_matches(
+                            self.styles(&cx.theme().highlight_theme),
+                            &self.code(),
+                            node_cx,
+                        ),
                         node_cx.link_click_handler.clone(),
                     ))
                     .when_some(node_cx.code_block_actions.clone(), |this, actions| {
@@ -1363,6 +1368,7 @@ pub(crate) struct NodeContext {
     pub(crate) code_block_actions: Option<Arc<CodeBlockActionsFn>>,
     pub(crate) table_actions: Option<Arc<TableActionsFn>>,
     pub(crate) link_click_handler: Option<Arc<LinkClickHandlerFn>>,
+    pub(crate) match_highlights: Option<MatchHighlights>,
     pub(crate) markdown_extensions: Arc<MarkdownExtensions>,
 }
 
@@ -1421,6 +1427,61 @@ fn text_column(options: NodeRenderOptions) -> DefiniteLength {
         Some(width) => width.into(),
         None => rems(1.).into(),
     }
+}
+
+/// `highlights` with the view's find matches in `text` laid over them.
+fn with_matches(
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    text: &str,
+    node_cx: &NodeContext,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    match &node_cx.match_highlights {
+        Some(matches) => overlay_matches(highlights, text, (matches.find)(text), matches.color),
+        None => highlights,
+    }
+}
+
+/// `highlights` with every range in `found` painted on a `color` ground,
+/// which wins over any other ground there. Ranges that are empty, out of
+/// bounds or off a character boundary are dropped.
+fn overlay_matches(
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    text: &str,
+    mut found: Vec<Range<usize>>,
+    color: Hsla,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    found.retain(|range| {
+        range.start < range.end
+            && range.end <= text.len()
+            && text.is_char_boundary(range.start)
+            && text.is_char_boundary(range.end)
+    });
+    if found.is_empty() {
+        return highlights;
+    }
+    let found = merged_ranges(found);
+    let marks = found.iter().map(|range| {
+        let style = HighlightStyle {
+            background_color: Some(color),
+            ..Default::default()
+        };
+        (range.clone(), style)
+    });
+    gpui::combine_highlights(highlights, marks)
+        .map(|(range, mut style)| {
+            // `combine_highlights` folds overlapping styles in no fixed
+            // order, and the match's ground has to win. It splits at every
+            // endpoint, so a piece is wholly inside a match or outside all.
+            let ix = found.partition_point(|m| m.end <= range.start);
+            if found
+                .get(ix)
+                .is_some_and(|m| m.start <= range.start && range.end <= m.end)
+            {
+                style.background_color = Some(color);
+            }
+            (range, style)
+        })
+        .collect()
 }
 
 /// `ranges` sorted, with any that touch or overlap merged into one.
@@ -1488,7 +1549,7 @@ impl Paragraph {
                             ix,
                             inline_node.state.clone(),
                             links.clone(),
-                            highlights.clone(),
+                            with_matches(highlights.clone(), &text, node_cx),
                             node_cx.link_click_handler.clone(),
                         )
                         .code(inline_code(std::mem::take(&mut code), node_cx, cx))
@@ -1621,6 +1682,7 @@ impl Paragraph {
 
         // Add the last text node
         if text.len() > 0 {
+            let highlights = with_matches(highlights, &text, node_cx);
             if let Ok(mut state) = self.state.lock() {
                 state.set_text(text.into());
             }
@@ -1669,7 +1731,7 @@ impl Paragraph {
                         state: inline_node.state.clone(),
                         text: text.clone().into(),
                         links: links.clone(),
-                        highlights: highlights.clone(),
+                        highlights: with_matches(highlights.clone(), &text, node_cx),
                     });
                 }
 
@@ -1744,6 +1806,7 @@ impl Paragraph {
             if let Ok(mut state) = self.state.lock() {
                 state.set_text(text.clone().into());
             }
+            let highlights = with_matches(highlights, &text, node_cx);
             items.push(InlineFlowItem::Text {
                 state: self.state.clone(),
                 text: text.into(),
@@ -2579,6 +2642,36 @@ impl BlockNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_match_paints_its_ground_over_any_other_and_nothing_else() {
+        let red = gpui::red();
+        let find = gpui::yellow();
+        let code = HighlightStyle {
+            background_color: Some(red),
+            font_weight: Some(FontWeight::BOLD),
+            ..Default::default()
+        };
+        // "the gap_seq value": code at 4..11, the match "gap" at 4..7.
+        let text = "the gap_seq value";
+        let out = overlay_matches(vec![(4..11, code)], text, vec![4..7], find);
+        assert_eq!(
+            out.iter().map(|(range, _)| range.clone()).collect::<Vec<_>>(),
+            vec![4..7, 7..11]
+        );
+        assert_eq!(out[0].1.background_color, Some(find), "the match wins");
+        assert_eq!(out[0].1.font_weight, Some(FontWeight::BOLD), "the rest is kept");
+        assert_eq!(out[1].1.background_color, Some(red));
+
+        // A match in plain text becomes a highlight of its own.
+        let out = overlay_matches(vec![], text, vec![12..17], find);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, 12..17);
+
+        // Empty, out of bounds and off-boundary ranges are dropped.
+        let out = overlay_matches(vec![], "é", vec![0..0, 0..5, 0..1], find);
+        assert!(out.is_empty());
+    }
 
     #[test]
     fn a_marker_column_is_the_indent_until_a_marker_is_wider() {

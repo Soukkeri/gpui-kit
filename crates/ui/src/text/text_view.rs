@@ -1,10 +1,10 @@
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Element, ElementId, Entity, GlobalElementId, Hitbox,
-    HitboxBehavior, InspectorElementId, InteractiveElement, IntoElement, LayoutId, MouseButton,
-    ParentElement, Pixels, SharedString, StyleRefinement, Styled, Window, div,
+    HitboxBehavior, Hsla, InspectorElementId, InteractiveElement, IntoElement, LayoutId,
+    MouseButton, ParentElement, Pixels, SharedString, StyleRefinement, Styled, Window, div,
 };
 
 use crate::StyledExt;
@@ -25,6 +25,14 @@ pub(crate) type TableActionsFn =
 
 pub(crate) type LinkClickHandlerFn =
     dyn Fn(&SharedString, &ClickEvent, &mut Window, &mut App) + Send + Sync;
+
+/// Words to mark in a text view: a finder that returns the byte ranges of a
+/// piece of rendered text to highlight, and the colour to highlight them in.
+#[derive(Clone)]
+pub(crate) struct MatchHighlights {
+    pub(crate) color: Hsla,
+    pub(crate) find: Arc<dyn Fn(&str) -> Vec<Range<usize>> + Send + Sync>,
+}
 
 pub(crate) fn handle_link_click(
     handler: &Option<Arc<LinkClickHandlerFn>>,
@@ -76,6 +84,7 @@ pub struct TextView {
     code_block_actions: Option<Arc<CodeBlockActionsFn>>,
     table_actions: Option<Arc<TableActionsFn>>,
     link_click_handler: Option<Arc<LinkClickHandlerFn>>,
+    match_highlights: Option<MatchHighlights>,
     markdown_extensions: Arc<MarkdownExtensions>,
 }
 
@@ -118,6 +127,7 @@ impl TextView {
             code_block_actions: None,
             table_actions: None,
             link_click_handler: None,
+            match_highlights: None,
             markdown_extensions: Arc::default(),
         }
     }
@@ -137,6 +147,7 @@ impl TextView {
             code_block_actions: None,
             table_actions: None,
             link_click_handler: None,
+            match_highlights: None,
             markdown_extensions: Arc::default(),
         }
     }
@@ -156,6 +167,7 @@ impl TextView {
             code_block_actions: None,
             table_actions: None,
             link_click_handler: None,
+            match_highlights: None,
             markdown_extensions: Arc::default(),
         }
     }
@@ -237,6 +249,26 @@ impl TextView {
         F: Fn(&SharedString, &ClickEvent, &mut Window, &mut App) + Send + Sync + 'static,
     {
         self.link_click_handler = Some(Arc::new(handler));
+        self
+    }
+
+    /// Highlight words in the rendered text, the way a find bar marks its
+    /// matches.
+    ///
+    /// `find` receives each piece of rendered text (a paragraph's run of
+    /// text, a heading, a table cell, a code block's code) and returns the
+    /// byte ranges in it to paint with a `color` ground. It runs at render
+    /// time, so a new query costs no re-parse; ranges that are empty, out of
+    /// bounds or off a character boundary are ignored. A match paints over
+    /// any other ground (inline code, `<mark>`).
+    pub fn highlight_matches<F>(mut self, color: impl Into<Hsla>, find: F) -> Self
+    where
+        F: Fn(&str) -> Vec<Range<usize>> + Send + Sync + 'static,
+    {
+        self.match_highlights = Some(MatchHighlights {
+            color: color.into(),
+            find: Arc::new(find),
+        });
         self
     }
 
@@ -371,6 +403,7 @@ impl Element for TextView {
             state.code_block_actions = self.code_block_actions.clone();
             state.table_actions = self.table_actions.clone();
             state.link_click_handler = self.link_click_handler.clone();
+            state.match_highlights = self.match_highlights.clone();
             state.set_markdown_extensions(self.markdown_extensions.clone(), cx);
             state.selectable = self.selectable;
             state.selection_format = self.selection_format;

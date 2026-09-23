@@ -8,8 +8,8 @@ use std::{
 use gpui::{
     AnyElement, App, DefiniteLength, Div, ElementId, FontStyle, FontWeight, Half, HighlightStyle,
     Hsla, InteractiveElement as _, IntoElement, Length, ObjectFit, Overflow, ParentElement,
-    Pixels, Rems, ScrollHandle, SharedString, SharedUri, StatefulInteractiveElement, Styled,
-    StyledImage as _,
+    Pixels, Rems, ScrollHandle, SharedString, SharedUri, Stateful, StatefulInteractiveElement,
+    Styled, StyledImage as _,
     WhiteSpace, Window, div, img, prelude::FluentBuilder as _, px, relative, rems,
 };
 use markdown::mdast;
@@ -1380,6 +1380,34 @@ impl PartialEq for NodeContext {
     }
 }
 
+/// One table row: a rule under every row but the last, and the first row
+/// set apart as the header when the style asks for one.
+fn table_row(
+    row_ix: usize,
+    row_count: usize,
+    cells: Vec<Stateful<Div>>,
+    style: &TextViewStyle,
+    cx: &App,
+) -> Stateful<Div> {
+    let header = style.table_header && row_ix == 0;
+    // Inside the table's 1 px border, so its corners sit one pixel in.
+    let inner_radius = (cx.theme().radius - px(1.)).max(px(0.));
+    div()
+        .id("row")
+        .w_full()
+        .when(row_ix + 1 < row_count, |this| this.border_b_1())
+        .border_color(cx.theme().border)
+        .when(header, |this| {
+            this.bg(cx.theme().tokens.muted)
+                .font_weight(FontWeight::SEMIBOLD)
+                .rounded_t(inner_radius)
+                .when(row_count == 1, |this| this.rounded_b(inner_radius))
+        })
+        .flex()
+        .flex_row()
+        .children(cells)
+}
+
 /// A list's marker column: at least the indent, and never narrower than
 /// the widest marker, rounded up to a whole pixel so it cannot wrap.
 fn marker_column(indent: Pixels, widest_marker: Pixels) -> Pixels {
@@ -2157,9 +2185,19 @@ impl BlockNode {
         // capped: a cap would clip overflowing text *and* leave it outside
         // the scrollable width, making it unreachable.
         let text_style = window.text_style();
+        let header_style = gpui::TextStyle {
+            font_weight: FontWeight::SEMIBOLD,
+            ..text_style.clone()
+        };
         let font_size = text_style.font_size.to_pixels(window.rem_size());
+        let column_rules = node_cx.style.table_column_rules;
         let mut col_w = vec![CELL_MIN_PX; col_count];
-        for row in table.children.iter() {
+        for (row_ix, row) in table.children.iter().enumerate() {
+            let row_style = if node_cx.style.table_header && row_ix == 0 {
+                &header_style
+            } else {
+                &text_style
+            };
             for (ix, cell) in row.children.iter().enumerate() {
                 let Some(slot) = col_w.get_mut(ix) else {
                     continue;
@@ -2170,7 +2208,7 @@ impl BlockNode {
                     if line.is_empty() {
                         continue;
                     }
-                    let run = text_style.to_run(line.len());
+                    let run = row_style.to_run(line.len());
                     let line_w = window
                         .text_system()
                         .layout_line(line, font_size, &[run], None)
@@ -2179,7 +2217,7 @@ impl BlockNode {
                 }
                 // Border-box widths, so the padding and border the cell draws
                 // must leave the measured text its full width.
-                let border = if ix + 1 < col_count {
+                let border = if column_rules && ix + 1 < col_count {
                     CELL_BORDER_PX
                 } else {
                     0.
@@ -2251,27 +2289,18 @@ impl BlockNode {
                         .when(align == ColumnumnAlign::Right, |this| this.text_right())
                         .px_2()
                         .py_1()
-                        .when(!is_last_col, |this| {
+                        .when(!is_last_col && column_rules, |this| {
                             this.border_r_1().border_color(cx.theme().border)
                         })
                         .refine_style(&style.table_cell)
                         .child(cell.children.render(node_cx, window, cx)),
                 );
             }
-            rows.push(
-                div()
-                    .id("row")
-                    .w_full()
-                    .when(row_ix < row_count - 1, |this| this.border_b_1())
-                    .border_color(cx.theme().border)
-                    .flex()
-                    .flex_row()
-                    .children(cells),
-            );
+            rows.push(table_row(row_ix, row_count, cells, style, cx));
         }
 
         div()
-            .pb(rems(1.))
+            .when(!options.is_last, |this| this.pb(rems(1.)))
             .w_full()
             .child(
                 // Scroll viewport: clips and scrolls horizontally (overflow-x
@@ -2348,7 +2377,7 @@ impl BlockNode {
                         .w(Length::Definite(relative(len as f32)))
                         .px_2()
                         .py_1()
-                        .when(!is_last_col, |this| {
+                        .when(!is_last_col && style.table_column_rules, |this| {
                             this.border_r_1().border_color(cx.theme().border)
                         })
                         .refine_style(&style.table_cell)
@@ -2356,20 +2385,11 @@ impl BlockNode {
                 );
             }
 
-            rows.push(
-                div()
-                    .id("row")
-                    .w_full()
-                    .when(row_ix < row_count - 1, |this| this.border_b_1())
-                    .border_color(cx.theme().border)
-                    .flex()
-                    .flex_row()
-                    .children(cells),
-            );
+            rows.push(table_row(row_ix, row_count, cells, style, cx));
         }
 
         div()
-            .pb(rems(1.))
+            .when(!options.is_last, |this| this.pb(rems(1.)))
             .w_full()
             .child(
                 div()

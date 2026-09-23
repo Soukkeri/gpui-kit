@@ -46,6 +46,11 @@ pub struct TextViewStyle {
     /// on a single line — columns then never shrink and the table scrolls as
     /// soon as the content is wider than the frame.
     pub table_cell: StyleRefinement,
+    /// Set the table's first row apart as its header, semibold on the theme's
+    /// `muted` ground. Default is `false` (the header row looks like a body row).
+    pub table_header: bool,
+    /// Draw a rule between table columns, default is `true`.
+    pub table_column_rules: bool,
     /// The highlight style for inline code.
     ///
     /// Default is [`HighlightStyle::default()`], the `background_color` will
@@ -99,6 +104,8 @@ impl PartialEq for TextViewStyle {
             && self.code_block == other.code_block
             && self.table == other.table
             && self.table_cell == other.table_cell
+            && self.table_header == other.table_header
+            && self.table_column_rules == other.table_column_rules
             && self.inline_code == other.inline_code
             && self.inline_code_font_family == other.inline_code_font_family
             && self.inline_code_chip == other.inline_code_chip
@@ -119,6 +126,8 @@ impl Default for TextViewStyle {
             code_block: StyleRefinement::default(),
             table: StyleRefinement::default(),
             table_cell: StyleRefinement::default(),
+            table_header: false,
+            table_column_rules: true,
             inline_code: HighlightStyle::default(),
             inline_code_font_family: None,
             inline_code_chip: None,
@@ -208,6 +217,18 @@ impl TextViewStyle {
         self
     }
 
+    /// Set the table's first row apart as its header, semibold on `muted`.
+    pub fn table_header(mut self, header: bool) -> Self {
+        self.table_header = header;
+        self
+    }
+
+    /// Draw a rule between table columns, default is `true`.
+    pub fn table_column_rules(mut self, rules: bool) -> Self {
+        self.table_column_rules = rules;
+        self
+    }
+
     /// Returns the [`HighlightStyle`] to use for inline code,
     /// fallback `background_color` to `cx.theme().accent`, if it is `None`.
     pub(crate) fn inline_code_highlight(&self, cx: &App) -> HighlightStyle {
@@ -248,6 +269,15 @@ mod tests {
         assert!(semibold != base);
         assert!(base != base.clone().heading_gap_above(rems(0.75)));
         assert_eq!(base.heading_gap_above, rems(0.), "no gap unless asked");
+    }
+
+    #[test]
+    fn table_header_and_rules_default_to_the_old_look_and_take_part_in_the_fingerprint() {
+        let base = TextViewStyle::default();
+        assert!(!base.table_header, "the header row looks like a body row unless asked");
+        assert!(base.table_column_rules, "column rules stay unless dropped");
+        assert!(base != base.clone().table_header(true));
+        assert!(base != base.clone().table_column_rules(false));
     }
 
     #[test]

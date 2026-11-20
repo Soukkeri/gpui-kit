@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, FontWeight, HighlightStyle, Pixels, Rems, SharedString, StyleRefinement, px, rems,
+    AbsoluteLength, App, FontWeight, HighlightStyle, Pixels, Rems, SharedString, StyleRefinement,
+    px, rems,
 };
 
 use crate::{ActiveTheme as _, highlighter::HighlightTheme};
@@ -51,6 +52,19 @@ pub struct TextViewStyle {
     pub table_header: bool,
     /// Draw a rule between table columns, default is `true`.
     pub table_column_rules: bool,
+    /// With the scroll table layout, the width a long column is squeezed to
+    /// (its text wrapping) before the table scrolls. Default is `None`: a
+    /// floor scaled to each column's content (the width at which its text
+    /// wraps to two lines, between 160 and 480 px), which makes a table with
+    /// one long text column scroll in any frame narrower than its floors.
+    ///
+    /// With a floor set the table fits the frame for as long as it can:
+    /// columns wider than the floor give way first and wrap, in proportion
+    /// to their content and never below the floor; only when all of them
+    /// stand at it do the columns at or under the floor wrap too, down to
+    /// half of it; below that the table scrolls. A short label column so
+    /// stays whole beside a long text column.
+    pub table_column_floor: Option<AbsoluteLength>,
     /// The highlight style for inline code.
     ///
     /// Default is [`HighlightStyle::default()`], the `background_color` will
@@ -107,6 +121,7 @@ impl PartialEq for TextViewStyle {
             && self.table_cell == other.table_cell
             && self.table_header == other.table_header
             && self.table_column_rules == other.table_column_rules
+            && self.table_column_floor == other.table_column_floor
             && self.inline_code == other.inline_code
             && self.inline_code_font_family == other.inline_code_font_family
             && self.inline_code_chip == other.inline_code_chip
@@ -129,6 +144,7 @@ impl Default for TextViewStyle {
             table_cell: StyleRefinement::default(),
             table_header: false,
             table_column_rules: true,
+            table_column_floor: None,
             inline_code: HighlightStyle::default(),
             inline_code_font_family: None,
             inline_code_chip: None,
@@ -230,6 +246,15 @@ impl TextViewStyle {
         self
     }
 
+    /// With the scroll table layout, fit the frame before scrolling: long
+    /// columns wrap down to `floor` first, then the short ones down to half
+    /// of it, and only then does the table scroll. Default is a floor scaled
+    /// to each column's content, up to 480 px.
+    pub fn table_column_floor(mut self, floor: impl Into<AbsoluteLength>) -> Self {
+        self.table_column_floor = Some(floor.into());
+        self
+    }
+
     /// Returns the [`HighlightStyle`] to use for inline code,
     /// fallback `background_color` to `cx.theme().accent`, if it is `None`.
     pub(crate) fn inline_code_highlight(&self, cx: &App) -> HighlightStyle {
@@ -279,6 +304,16 @@ mod tests {
         assert!(base.table_column_rules, "column rules stay unless dropped");
         assert!(base != base.clone().table_header(true));
         assert!(base != base.clone().table_column_rules(false));
+    }
+
+    #[test]
+    fn table_column_floor_is_unset_by_default_and_takes_part_in_the_fingerprint() {
+        let base = TextViewStyle::default();
+        assert_eq!(base.table_column_floor, None, "the content-scaled floors unless asked");
+        assert!(base != base.clone().table_column_floor(rems(10.)));
+        assert!(
+            base.clone().table_column_floor(rems(10.)) != base.clone().table_column_floor(rems(8.))
+        );
     }
 
     #[test]

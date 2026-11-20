@@ -19,7 +19,7 @@ use crate::{
     ActiveTheme as _, Icon, IconName, StyledExt, h_flex,
     highlighter::{HighlightTheme, LanguageRegistry, SyntaxHighlighter},
     input::{InputEdit, Point, RopeExt as _},
-    scroll::horizontal_scroll_area,
+    scroll::{Scrollbar, ScrollbarMode, horizontal_scroll_area},
     text::{
         CodeBlockActionsFn, LinkClickHandlerFn, MarkdownExtensions, MarkdownNode, MatchHighlights,
         TableActionsFn,
@@ -1414,6 +1414,75 @@ fn table_row(
         .children(cells)
 }
 
+/// How far one column of the scroll table shrinks before the table scrolls
+/// (a border-box width), and how readily next to the other columns.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ColumnFit {
+    min_w: f32,
+    shrink: f32,
+}
+
+/// The floor and the shrink weight of every column of the scroll table, from
+/// the columns' max-content widths `col_w` and, read only with a `floor`,
+/// the widths of their longest words `col_word_w` (both border-box).
+///
+/// Without a `floor` (`TextViewStyle::table_column_floor` unset) a column
+/// stops at a floor scaled to its content: roughly the width at which its
+/// text wraps to `CELL_WRAP_MAX_LINES` lines, clamped between two bounds so
+/// moderate columns can still wrap meaningfully while one huge column cannot
+/// push the scroll threshold arbitrarily high. All columns shrink together.
+///
+/// With a `floor` the table fits the frame for as long as it can, in two
+/// steps that one flex pass resolves. Columns wider than the floor shrink
+/// `LONG_SHRINK` times as readily as the rest, so they take all of the
+/// squeeze, in proportion to their content (which evens out the lines each
+/// one wraps to), and freeze at the floor. Only when every one of them is
+/// frozen does the flex algorithm hand what is left to the columns at or
+/// under the floor, which then wrap down to their longest word, as far as a
+/// browser's table goes. So a short label column stays whole beside a long
+/// text column, a table of many short columns wraps before it scrolls, and
+/// one that scrolls has nothing left to give.
+///
+/// Nowrap cells never shrink below their single-line content: their floor
+/// is the content width itself.
+fn column_fits(
+    col_w: &[f32],
+    col_word_w: &[f32],
+    floor: Option<f32>,
+    nowrap: bool,
+) -> Vec<ColumnFit> {
+    const CELL_WRAP_MAX_LINES: f32 = 2.0;
+    const CELL_WRAP_MIN_PX: f32 = 160.0;
+    const CELL_WRAP_MAX_PX: f32 = 480.0;
+    // Large enough that a short column's share of the squeeze stays far
+    // under the measuring slack, and the short side's weight no smaller than
+    // 1: flex factors that sum to less than 1 give up only that fraction of
+    // the overflow.
+    const LONG_SHRINK: f32 = 10_000.0;
+
+    col_w
+        .iter()
+        .enumerate()
+        .map(|(ix, &w)| match floor {
+            _ if nowrap => ColumnFit { min_w: w, shrink: 1. },
+            Some(floor) if w > floor => ColumnFit {
+                min_w: floor,
+                shrink: LONG_SHRINK,
+            },
+            Some(_) => ColumnFit {
+                min_w: col_word_w.get(ix).map_or(w, |word_w| w.min(*word_w)),
+                shrink: 1.,
+            },
+            None => ColumnFit {
+                min_w: (w / CELL_WRAP_MAX_LINES)
+                    .clamp(CELL_WRAP_MIN_PX, CELL_WRAP_MAX_PX)
+                    .min(w),
+                shrink: 1.,
+            },
+        })
+        .collect()
+}
+
 /// Where a list item's continuation blocks and nested lists start: the
 /// marker column when the list has one, else the old 1 rem.
 fn text_column(options: NodeRenderOptions) -> DefiniteLength {
@@ -2238,15 +2307,11 @@ impl BlockNode {
     ) -> AnyElement {
         const CELL_PAD_PX: f32 = 16.0; // px_2 horizontal padding
         const CELL_MIN_PX: f32 = 48.0;
-        // Shrinking columns stop (and the table starts to scroll) at a floor
-        // scaled to their content: roughly the width at which the text wraps
-        // to `CELL_WRAP_MAX_LINES` lines, clamped between the two bounds so
-        // moderate columns can still wrap meaningfully while one huge column
-        // cannot push the scroll threshold arbitrarily high.
-        const CELL_WRAP_MAX_LINES: f32 = 2.0;
-        const CELL_WRAP_MIN_PX: f32 = 160.0;
-        const CELL_WRAP_MAX_PX: f32 = 480.0;
         const CELL_BORDER_PX: f32 = 1.0; // border_r_1 drawn by every column but the last
+        // With `table_column_floor` a short column keeps its width while the
+        // long ones wrap, but for the sliver its small shrink weight gives
+        // up; a pixel in hand keeps its widest cell on one line.
+        const FIT_SLACK_PX: f32 = 1.0;
         const TABLE_BORDER_PX: f32 = 2.0; // the track's border_1, left + right
 
         // Measure the widest text per column (max-content width). Never
@@ -2259,7 +2324,18 @@ impl BlockNode {
         };
         let font_size = text_style.font_size.to_pixels(window.rem_size());
         let column_rules = node_cx.style.table_column_rules;
+        // The app's floor (`TextViewStyle::table_column_floor`) in pixels, a
+        // rem length taken in the window's rem, or `None` for the
+        // content-scaled floors.
+        let fit_floor = node_cx
+            .style
+            .table_column_floor
+            .map(|floor| f32::from(floor.to_pixels(window.rem_size())));
+        let slack = if fit_floor.is_some() { FIT_SLACK_PX } else { 0. };
         let mut col_w = vec![CELL_MIN_PX; col_count];
+        // With a floor, also each column's longest word (its min-content
+        // width, near enough): what a short column wraps down to.
+        let mut col_word_w = vec![CELL_MIN_PX; col_count];
         for (row_ix, row) in table.children.iter().enumerate() {
             let row_style = if node_cx.style.table_header && row_ix == 0 {
                 &header_style
@@ -2270,8 +2346,9 @@ impl BlockNode {
                 let Some(slot) = col_w.get_mut(ix) else {
                     continue;
                 };
+                let text = cell.children.text();
                 let mut w = 0.0_f32;
-                for line in cell.children.text().split('\n') {
+                for line in text.split('\n') {
                     let line = line.trim();
                     if line.is_empty() {
                         continue;
@@ -2290,27 +2367,35 @@ impl BlockNode {
                 } else {
                     0.
                 };
-                *slot = slot.max(w + CELL_PAD_PX + border);
+                *slot = slot.max(w + CELL_PAD_PX + border + slack);
+
+                if fit_floor.is_none() {
+                    continue;
+                }
+                // One more line laid out per cell, not one per word: the
+                // word with the most characters stands in for the widest,
+                // and the wrapper breaks nowhere a space does not.
+                let Some(word) = text.split_whitespace().max_by_key(|word| word.chars().count())
+                else {
+                    continue;
+                };
+                let run = row_style.to_run(word.len());
+                let word_w = window
+                    .text_system()
+                    .layout_line(word, font_size, &[run], None)
+                    .width;
+                col_word_w[ix] =
+                    col_word_w[ix].max(f32::from(word_w) + CELL_PAD_PX + border + slack);
             }
         }
         let style = &node_cx.style;
-        // Nowrap cells (via the `table_cell` refinement, which cascades to
-        // the cell text) must never shrink below their single-line content,
-        // so their floor is the content width itself.
+        // Shrinking columns stop (and the table starts to scroll) at their
+        // floors. Nowrap cells come via the `table_cell` refinement, which
+        // cascades to the cell text.
         let nowrap = style.table_cell.text.white_space == Some(WhiteSpace::Nowrap);
-        let col_min_w: Vec<f32> = if nowrap {
-            col_w.clone()
-        } else {
-            col_w
-                .iter()
-                .map(|w| {
-                    (w / CELL_WRAP_MAX_LINES)
-                        .clamp(CELL_WRAP_MIN_PX, CELL_WRAP_MAX_PX)
-                        .min(*w)
-                })
-                .collect()
-        };
-        let min_total_w: f32 = col_min_w.iter().sum::<f32>() + TABLE_BORDER_PX;
+        let col_fit = column_fits(&col_w, &col_word_w, fit_floor, nowrap);
+        let min_total_w: f32 =
+            col_fit.iter().map(|fit| fit.min_w).sum::<f32>() + TABLE_BORDER_PX;
 
         let table_scroll_key = if let Some(span) = table.span {
             SharedString::from(format!(
@@ -2338,20 +2423,28 @@ impl BlockNode {
                 let align = table.column_align(ix);
                 let is_last_col = ix == row.children.len() - 1;
                 let width = col_w.get(ix).copied().unwrap_or(CELL_MIN_PX);
-                let min_width = col_min_w.get(ix).copied().unwrap_or(CELL_MIN_PX);
+                let fit = col_fit.get(ix).copied().unwrap_or(ColumnFit {
+                    min_w: CELL_MIN_PX,
+                    shrink: 1.,
+                });
                 cells.push(
                     div()
                         .id(("cell", ix))
+                        // The column widths are the whole of this layout and
+                        // a drawn tree has no other way to be asked for them.
+                        // A no-op outside test builds; see `debug_selector`.
+                        .debug_selector(move || format!("table-cell-{row_ix}-{ix}"))
                         // Measured max-content width is the flex-basis;
                         // `flex_grow` (proportional to it) distributes extra
                         // space so a narrow table still fills the frame, while
                         // shrinking is clamped at `min_w` — the flex engine
                         // squeezes columns (their text wraps) down to the
-                        // floors before the track starts to scroll.
+                        // floors before the track starts to scroll, the
+                        // readier ones first (`column_fits`).
                         .flex_basis(px(width))
                         .flex_grow(width)
-                        .flex_shrink(1.)
-                        .min_w(px(min_width))
+                        .flex_shrink(fit.shrink)
+                        .min_w(px(fit.min_w))
                         .overflow_hidden()
                         .when(align == ColumnumnAlign::Center, |this| this.text_center())
                         .when(align == ColumnumnAlign::Right, |this| this.text_right())
@@ -2392,6 +2485,16 @@ impl BlockNode {
                         .rounded(cx.theme().radius)
                         .children(rows),
                 ),
+            )
+            // A table that scrolls says so: without a bar its right side is
+            // out of sight with nothing on screen to tell a mouse user it is
+            // there, or how to reach it without a sideways wheel. Over the
+            // viewport's own bounds (the handle's), shown while the pointer
+            // is on the table, and nothing at all for a table that fits.
+            .child(
+                Scrollbar::horizontal(&scroll_handle)
+                    .id(("table-scrollbar", options.ix))
+                    .mode(ScrollbarMode::Hover),
             )
             // Custom actions row (e.g. copy / download) rendered below the
             // table. The hook's element spans full width; alignment is up to
@@ -2637,6 +2740,52 @@ impl BlockNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn column_fits_keep_the_content_scaled_floors_unless_a_floor_is_set() {
+        // Two lines' worth, between 160 and 480, never over the content.
+        let fits = column_fits(&[48., 150., 450., 2326.], &[48., 90., 70., 110.], None, false);
+        assert_eq!(
+            fits.iter().map(|fit| fit.min_w).collect::<Vec<_>>(),
+            vec![48., 150., 225., 480.]
+        );
+        assert!(fits.iter().all(|fit| fit.shrink == 1.), "all columns shrink together");
+    }
+
+    #[test]
+    fn column_fits_with_a_floor_squeeze_the_long_columns_first() {
+        let fits = column_fits(
+            &[48., 150., 160., 450., 2326.],
+            &[48., 90., 160., 70., 110.],
+            Some(160.),
+            false,
+        );
+        // At or under the floor: whole until the long ones are frozen, then
+        // down to the longest word (a column that is one word never moves).
+        assert_eq!(fits[0], ColumnFit { min_w: 48., shrink: 1. });
+        assert_eq!(fits[1], ColumnFit { min_w: 90., shrink: 1. });
+        assert_eq!(fits[2], ColumnFit { min_w: 160., shrink: 1. });
+        // Over the floor: the floor itself, however long the text, so one
+        // huge column no longer sets a scroll threshold of 480.
+        assert_eq!(fits[3].min_w, 160.);
+        assert_eq!(fits[4].min_w, 160.);
+        assert!(fits[3].shrink == fits[4].shrink, "in proportion to their content");
+        assert!(fits[3].shrink >= 1_000. * fits[1].shrink, "and well before the short ones");
+        // Flex factors that sum to less than 1 give up only a fraction of
+        // the overflow, which would leave the short columns unable to wrap.
+        assert!(fits.iter().all(|fit| fit.shrink >= 1.));
+    }
+
+    #[test]
+    fn column_fits_never_shrink_a_nowrap_column() {
+        for floor in [None, Some(160.)] {
+            let fits = column_fits(&[48., 150., 2326.], &[48., 90., 110.], floor, true);
+            assert_eq!(
+                fits.iter().map(|fit| fit.min_w).collect::<Vec<_>>(),
+                vec![48., 150., 2326.]
+            );
+        }
+    }
 
     #[test]
     fn a_match_paints_its_ground_over_any_other_and_nothing_else() {

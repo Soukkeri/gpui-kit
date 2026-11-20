@@ -771,6 +771,219 @@ mod tests {
         }
     }
 
+    /// Draw a Markdown table in the scroll layout inside a `frame` px wide
+    /// box and return the painted bounds of its first body row's cells.
+    fn draw_scroll_table(
+        cx: &mut TestAppContext,
+        markdown: &'static str,
+        columns: usize,
+        frame: f32,
+        style: TextViewStyle,
+    ) -> Vec<Bounds<Pixels>> {
+        struct ScrollTableRoot {
+            markdown: &'static str,
+            frame: f32,
+            style: TextViewStyle,
+        }
+
+        impl Render for ScrollTableRoot {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                let mut table_style = StyleRefinement::default();
+                table_style.overflow.x = Some(Overflow::Scroll);
+                div().w(px(self.frame)).child(
+                    TextView::markdown("scroll-table", self.markdown)
+                        .style(self.style.clone().table(table_style)),
+                )
+            }
+        }
+
+        cx.update(crate::init);
+        let (_, cx) = cx.add_window_view(move |_, _| ScrollTableRoot {
+            markdown,
+            frame,
+            style,
+        });
+        let cx: &mut VisualTestContext = cx;
+
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        (0..columns)
+            .map(|ix| {
+                cx.debug_bounds(Box::leak(format!("table-cell-1-{ix}").into_boxed_str()))
+                    .expect("every cell of the first body row should be painted")
+            })
+            .collect()
+    }
+
+    /// The table of the report this layout was fixed for: a number, a short
+    /// label, a clause and a paragraph.
+    const PROSE_TABLE: &str = "| # | Stock | Drop | Why it looks overdone |\n|---|---|---|---|\n| 1 | Broadcom Inc | Down for two days on a downgrade plus selling across all chip stocks | Chip sales rose strongly in the quarter and even the analyst who downgraded it kept a target far above the recent price, so the fall is about the mood around the whole sector and not about anything the company itself reported or said about the coming year |";
+
+    #[gpui::test]
+    fn a_table_with_a_column_floor_fits_its_frame_and_keeps_a_label_whole(
+        cx: &mut TestAppContext,
+    ) {
+        const FRAME: f32 = 680.;
+        let fits = |cells: &[Bounds<Pixels>]| {
+            cells.last().expect("cells").right() <= cells[0].left() + px(FRAME)
+        };
+
+        // Each column's own width: nowrap cells never shrink.
+        let mut nowrap = StyleRefinement::default();
+        nowrap.text.white_space = Some(gpui::WhiteSpace::Nowrap);
+        let natural = draw_scroll_table(
+            cx,
+            PROSE_TABLE,
+            4,
+            FRAME,
+            TextViewStyle::default().table_cell(nowrap),
+        );
+        let label = natural[1].size.width;
+        assert!(
+            label < px(160.) && natural[3].size.width > px(FRAME),
+            "the test's table: a label under the floor beside a paragraph wider than the frame, got {natural:?}"
+        );
+
+        // The control: with the content-scaled floors the paragraph's 480 px
+        // pushes the table out of the frame, and its right side out of sight.
+        let before = draw_scroll_table(cx, PROSE_TABLE, 4, FRAME, TextViewStyle::default());
+        assert!(!fits(&before), "the old floors should overflow a 680 px frame, got {before:?}");
+
+        let after = draw_scroll_table(
+            cx,
+            PROSE_TABLE,
+            4,
+            FRAME,
+            TextViewStyle::default().table_column_floor(px(160.)),
+        );
+        assert!(fits(&after), "the table should fit its frame, got {after:?}");
+        // The label keeps its own width (and the pixel of slack) while the
+        // two long columns take the squeeze, neither under the floor.
+        assert!(
+            after[1].size.width >= label && after[1].size.width <= label + px(1.5),
+            "the label column should stay whole: {:?} against its own {label:?}",
+            after[1].size.width
+        );
+        assert!(after[2].size.width >= px(160.) && after[3].size.width >= px(160.));
+        assert!(after[3].size.width > after[2].size.width, "the longer text gets the room");
+    }
+
+    #[gpui::test]
+    fn a_table_of_short_columns_wraps_to_its_longest_words_before_it_scrolls(
+        cx: &mut TestAppContext,
+    ) {
+        const FRAME: f32 = 680.;
+        const EIGHT: &str = "| a | b | c | d | e | f | g | h |\n|---|---|---|---|---|---|---|---|\n| one two three | one two three | one two three | one two three | one two three | one two three | one two three | one two three |";
+        const TWELVE: &str = "| a | b | c | d | e | f | g | h | i | j | k | l |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n| one two three | one two three | one two three | one two three | one two three | one two three | one two three | one two three | one two three | one two three | one two three | one two three |";
+        let floor = || TextViewStyle::default().table_column_floor(px(160.));
+
+        let mut nowrap = StyleRefinement::default();
+        nowrap.text.white_space = Some(gpui::WhiteSpace::Nowrap);
+        let natural =
+            draw_scroll_table(cx, EIGHT, 8, FRAME, TextViewStyle::default().table_cell(nowrap));
+        let column = natural[0].size.width;
+        assert!(
+            column > px(FRAME / 8.) && column <= px(160.),
+            "the test's table: eight columns under the floor that do not fit side by side, got {column:?}"
+        );
+
+        // The longest word's own column, which is as far as a column wraps.
+        // In a frame too narrow to hold it, so the column cannot grow.
+        let mut nowrap = StyleRefinement::default();
+        nowrap.text.white_space = Some(gpui::WhiteSpace::Nowrap);
+        let word = draw_scroll_table(
+            cx,
+            "| a |\n|---|\n| three |",
+            1,
+            10.,
+            TextViewStyle::default().table_cell(nowrap),
+        )[0]
+        .size
+        .width;
+        assert!(
+            word * 8. <= px(FRAME - 2.) && word * 12. > px(FRAME),
+            "the test's table: eight words fit side by side and twelve do not, got {word:?}"
+        );
+
+        // Eight wrap and the table fits, no column under its longest word.
+        let eight = draw_scroll_table(cx, EIGHT, 8, FRAME, floor());
+        assert!(eight[7].right() <= eight[0].left() + px(FRAME), "got {eight:?}");
+        assert!(eight.iter().all(|cell| cell.size.width >= word && cell.size.width < column));
+
+        // Twelve stop at their longest word (with the rule a column draws
+        // on its right and the pixel of slack) and the table scrolls.
+        let twelve = draw_scroll_table(cx, TWELVE, 12, FRAME, floor());
+        assert!(twelve[11].right() > twelve[0].left() + px(FRAME), "got {twelve:?}");
+        assert!(
+            twelve.iter().all(|cell| cell.size.width >= word && cell.size.width <= word + px(2.5)),
+            "got {twelve:?} against the word's {word:?}"
+        );
+    }
+
+    /// A table that still scrolls shows a bar under the pointer, and the bar
+    /// works: without one the columns past the frame were out of reach of a
+    /// mouse with no sideways wheel, and nothing said they were there.
+    #[gpui::test]
+    fn a_scrolling_table_has_a_bar_that_scrolls_it(cx: &mut TestAppContext) {
+        struct WideTableRoot;
+
+        impl Render for WideTableRoot {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                let mut table_style = StyleRefinement::default();
+                table_style.overflow.x = Some(Overflow::Scroll);
+                let mut nowrap = StyleRefinement::default();
+                nowrap.text.white_space = Some(gpui::WhiteSpace::Nowrap);
+                div().w(px(320.)).child(
+                    TextView::markdown(
+                        "wide-table",
+                        "| a | b | c | d |\n|---|---|---|---|\n| one two three four | one two three four | one two three four | one two three four |",
+                    )
+                    .style(TextViewStyle::default().table(table_style).table_cell(nowrap)),
+                )
+            }
+        }
+
+        cx.update(crate::init);
+        let (_, cx) = cx.add_window_view(|_, _| WideTableRoot);
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let first = cx.debug_bounds("table-cell-1-0").expect("first cell");
+        let last = cx.debug_bounds("table-cell-1-3").expect("last cell");
+        assert!(last.right() > px(320.), "the test's table should overflow, got {last:?}");
+
+        // The bar lies along the bottom edge of the table's viewport. A
+        // press on its track, right of the thumb, jumps the table there.
+        let on_bar = first.bottom() - px(4.);
+        cx.simulate_mouse_move(point(px(40.), on_bar), None, Modifiers::default());
+        cx.run_until_parked();
+        cx.simulate_click(point(px(300.), on_bar), Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let scrolled = cx.debug_bounds("table-cell-1-0").expect("first cell");
+        assert!(
+            scrolled.left() < first.left(),
+            "the press on the bar should scroll the table: {scrolled:?} against {first:?}"
+        );
+    }
+
     #[test]
     fn plugin_accepts_text_view_plugins_beyond_markdown() {
         let view = TextView::markdown("plugin-test", "").plugin(DummyTextViewPlugin);

@@ -1423,32 +1423,37 @@ struct ColumnFit {
 }
 
 /// The floor and the shrink weight of every column of the scroll table, from
-/// the columns' max-content widths `col_w` and, read only with a `floor`,
+/// the columns' max-content widths `col_w` and, read only with `keep_whole`,
 /// the widths of their longest words `col_word_w` (both border-box).
 ///
-/// Without a `floor` (`TextViewStyle::table_column_floor` unset) a column
-/// stops at a floor scaled to its content: roughly the width at which its
-/// text wraps to `CELL_WRAP_MAX_LINES` lines, clamped between two bounds so
-/// moderate columns can still wrap meaningfully while one huge column cannot
-/// push the scroll threshold arbitrarily high. All columns shrink together.
+/// Without `keep_whole` (`TextViewStyle::table_fit` unset) a column stops at
+/// a floor scaled to its content: roughly the width at which its text wraps
+/// to `CELL_WRAP_MAX_LINES` lines, clamped between two bounds so moderate
+/// columns can still wrap meaningfully while one huge column cannot push the
+/// scroll threshold arbitrarily high. All columns shrink together.
 ///
-/// With a `floor` the table fits the frame for as long as it can, in two
-/// steps that one flex pass resolves. Columns wider than the floor shrink
-/// `LONG_SHRINK` times as readily as the rest, so they take all of the
-/// squeeze, in proportion to their content (which evens out the lines each
-/// one wraps to), and freeze at the floor. Only when every one of them is
-/// frozen does the flex algorithm hand what is left to the columns at or
-/// under the floor, which then wrap down to their longest word, as far as a
-/// browser's table goes. So a short label column stays whole beside a long
-/// text column, a table of many short columns wraps before it scrolls, and
-/// one that scrolls has nothing left to give.
+/// With `keep_whole` the table is laid out as a browser lays one out: every
+/// column may wrap down to its longest word, so the table fits any frame
+/// that can hold one word a line and scrolls only in a narrower one. There
+/// is no wider floor on purpose. One was tried (a fixed width a long column
+/// stopped at) and a table of four long columns and a number column then
+/// scrolled out of a 680 px frame that could have held all five.
+///
+/// Who gives way first is the shrink weight, in two steps one flex pass
+/// resolves. Columns wider than `keep_whole` shrink `LONG_SHRINK` times as
+/// readily as the rest and by the room each has over its longest word
+/// (flex shrinks by weight times width, hence the division), so they reach
+/// their floors together, a long text column giving the most. Only when
+/// every one of them is frozen does the flex algorithm hand what is left to
+/// the columns up to `keep_whole` wide, which then wrap too. So a short
+/// label column stays whole beside a long text column.
 ///
 /// Nowrap cells never shrink below their single-line content: their floor
 /// is the content width itself.
 fn column_fits(
     col_w: &[f32],
     col_word_w: &[f32],
-    floor: Option<f32>,
+    keep_whole: Option<f32>,
     nowrap: bool,
 ) -> Vec<ColumnFit> {
     const CELL_WRAP_MAX_LINES: f32 = 2.0;
@@ -1463,16 +1468,19 @@ fn column_fits(
     col_w
         .iter()
         .enumerate()
-        .map(|(ix, &w)| match floor {
+        .map(|(ix, &w)| match keep_whole {
             _ if nowrap => ColumnFit { min_w: w, shrink: 1. },
-            Some(floor) if w > floor => ColumnFit {
-                min_w: floor,
-                shrink: LONG_SHRINK,
-            },
-            Some(_) => ColumnFit {
-                min_w: col_word_w.get(ix).map_or(w, |word_w| w.min(*word_w)),
-                shrink: 1.,
-            },
+            Some(keep_whole) => {
+                let min_w = col_word_w.get(ix).map_or(w, |word_w| w.min(*word_w));
+                ColumnFit {
+                    min_w,
+                    shrink: if w > keep_whole {
+                        LONG_SHRINK * (w - min_w) / w
+                    } else {
+                        1.
+                    },
+                }
+            }
             None => ColumnFit {
                 min_w: (w / CELL_WRAP_MAX_LINES)
                     .clamp(CELL_WRAP_MIN_PX, CELL_WRAP_MAX_PX)
@@ -2308,7 +2316,7 @@ impl BlockNode {
         const CELL_PAD_PX: f32 = 16.0; // px_2 horizontal padding
         const CELL_MIN_PX: f32 = 48.0;
         const CELL_BORDER_PX: f32 = 1.0; // border_r_1 drawn by every column but the last
-        // With `table_column_floor` a short column keeps its width while the
+        // With `table_fit` a short column keeps its width while the
         // long ones wrap, but for the sliver its small shrink weight gives
         // up; a pixel in hand keeps its widest cell on one line.
         const FIT_SLACK_PX: f32 = 1.0;
@@ -2324,17 +2332,17 @@ impl BlockNode {
         };
         let font_size = text_style.font_size.to_pixels(window.rem_size());
         let column_rules = node_cx.style.table_column_rules;
-        // The app's floor (`TextViewStyle::table_column_floor`) in pixels, a
-        // rem length taken in the window's rem, or `None` for the
+        // The widest column kept whole (`TextViewStyle::table_fit`) in
+        // pixels, a rem length taken in the window's rem, or `None` for the
         // content-scaled floors.
-        let fit_floor = node_cx
+        let keep_whole = node_cx
             .style
-            .table_column_floor
-            .map(|floor| f32::from(floor.to_pixels(window.rem_size())));
-        let slack = if fit_floor.is_some() { FIT_SLACK_PX } else { 0. };
+            .table_fit
+            .map(|width| f32::from(width.to_pixels(window.rem_size())));
+        let slack = if keep_whole.is_some() { FIT_SLACK_PX } else { 0. };
         let mut col_w = vec![CELL_MIN_PX; col_count];
-        // With a floor, also each column's longest word (its min-content
-        // width, near enough): what a short column wraps down to.
+        // With `table_fit`, also each column's longest word (its min-content
+        // width, near enough): what a column wraps down to.
         let mut col_word_w = vec![CELL_MIN_PX; col_count];
         for (row_ix, row) in table.children.iter().enumerate() {
             let row_style = if node_cx.style.table_header && row_ix == 0 {
@@ -2369,7 +2377,7 @@ impl BlockNode {
                 };
                 *slot = slot.max(w + CELL_PAD_PX + border + slack);
 
-                if fit_floor.is_none() {
+                if keep_whole.is_none() {
                     continue;
                 }
                 // One more line laid out per cell, not one per word: the
@@ -2393,7 +2401,7 @@ impl BlockNode {
         // floors. Nowrap cells come via the `table_cell` refinement, which
         // cascades to the cell text.
         let nowrap = style.table_cell.text.white_space == Some(WhiteSpace::Nowrap);
-        let col_fit = column_fits(&col_w, &col_word_w, fit_floor, nowrap);
+        let col_fit = column_fits(&col_w, &col_word_w, keep_whole, nowrap);
         let min_total_w: f32 =
             col_fit.iter().map(|fit| fit.min_w).sum::<f32>() + TABLE_BORDER_PX;
 
@@ -2742,7 +2750,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn column_fits_keep_the_content_scaled_floors_unless_a_floor_is_set() {
+    fn column_fits_keep_the_content_scaled_floors_unless_table_fit_is_set() {
         // Two lines' worth, between 160 and 480, never over the content.
         let fits = column_fits(&[48., 150., 450., 2326.], &[48., 90., 70., 110.], None, false);
         assert_eq!(
@@ -2753,24 +2761,28 @@ mod tests {
     }
 
     #[test]
-    fn column_fits_with_a_floor_squeeze_the_long_columns_first() {
+    fn column_fits_with_table_fit_wrap_every_column_to_a_word_the_long_ones_first() {
         let fits = column_fits(
             &[48., 150., 160., 450., 2326.],
             &[48., 90., 160., 70., 110.],
             Some(160.),
             false,
         );
-        // At or under the floor: whole until the long ones are frozen, then
-        // down to the longest word (a column that is one word never moves).
-        assert_eq!(fits[0], ColumnFit { min_w: 48., shrink: 1. });
-        assert_eq!(fits[1], ColumnFit { min_w: 90., shrink: 1. });
-        assert_eq!(fits[2], ColumnFit { min_w: 160., shrink: 1. });
-        // Over the floor: the floor itself, however long the text, so one
-        // huge column no longer sets a scroll threshold of 480.
-        assert_eq!(fits[3].min_w, 160.);
-        assert_eq!(fits[4].min_w, 160.);
-        assert!(fits[3].shrink == fits[4].shrink, "in proportion to their content");
-        assert!(fits[3].shrink >= 1_000. * fits[1].shrink, "and well before the short ones");
+        // Every column may wrap down to its longest word and no further.
+        // No wider floor: the table fits whenever one word a line does.
+        assert_eq!(
+            fits.iter().map(|fit| fit.min_w).collect::<Vec<_>>(),
+            vec![48., 90., 160., 70., 110.]
+        );
+        // Up to `keep_whole` wide: whole until the long ones are frozen.
+        assert!(fits[..3].iter().all(|fit| fit.shrink == 1.));
+        // Wider: well before the short ones, and by the room each has over
+        // its longest word (flex shrinks by weight times width), so they
+        // reach their floors together.
+        assert!(fits[3].shrink >= 1_000. && fits[4].shrink >= 1_000.);
+        let gives = |ix: usize, w: f32| fits[ix].shrink * w;
+        let ratio = gives(4, 2326.) / gives(3, 450.);
+        assert!((ratio - (2326. - 110.) / (450. - 70.)).abs() < 0.01, "got {ratio}");
         // Flex factors that sum to less than 1 give up only a fraction of
         // the overflow, which would leave the short columns unable to wrap.
         assert!(fits.iter().all(|fit| fit.shrink >= 1.));
@@ -2778,8 +2790,8 @@ mod tests {
 
     #[test]
     fn column_fits_never_shrink_a_nowrap_column() {
-        for floor in [None, Some(160.)] {
-            let fits = column_fits(&[48., 150., 2326.], &[48., 90., 110.], floor, true);
+        for keep_whole in [None, Some(160.)] {
+            let fits = column_fits(&[48., 150., 2326.], &[48., 90., 110.], keep_whole, true);
             assert_eq!(
                 fits.iter().map(|fit| fit.min_w).collect::<Vec<_>>(),
                 vec![48., 150., 2326.]

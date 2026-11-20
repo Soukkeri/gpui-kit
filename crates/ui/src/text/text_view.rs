@@ -827,7 +827,7 @@ mod tests {
     const PROSE_TABLE: &str = "| # | Stock | Drop | Why it looks overdone |\n|---|---|---|---|\n| 1 | Broadcom Inc | Down for two days on a downgrade plus selling across all chip stocks | Chip sales rose strongly in the quarter and even the analyst who downgraded it kept a target far above the recent price, so the fall is about the mood around the whole sector and not about anything the company itself reported or said about the coming year |";
 
     #[gpui::test]
-    fn a_table_with_a_column_floor_fits_its_frame_and_keeps_a_label_whole(
+    fn a_table_with_table_fit_fits_its_frame_and_keeps_a_label_whole(
         cx: &mut TestAppContext,
     ) {
         const FRAME: f32 = 680.;
@@ -848,7 +848,7 @@ mod tests {
         let label = natural[1].size.width;
         assert!(
             label < px(160.) && natural[3].size.width > px(FRAME),
-            "the test's table: a label under the floor beside a paragraph wider than the frame, got {natural:?}"
+            "the test's table: a label kept whole beside a paragraph wider than the frame, got {natural:?}"
         );
 
         // The control: with the content-scaled floors the paragraph's 480 px
@@ -861,18 +861,53 @@ mod tests {
             PROSE_TABLE,
             4,
             FRAME,
-            TextViewStyle::default().table_column_floor(px(160.)),
+            TextViewStyle::default().table_fit(px(160.)),
         );
         assert!(fits(&after), "the table should fit its frame, got {after:?}");
         // The label keeps its own width (and the pixel of slack) while the
-        // two long columns take the squeeze, neither under the floor.
+        // two long columns take the squeeze.
         assert!(
             after[1].size.width >= label && after[1].size.width <= label + px(1.5),
             "the label column should stay whole: {:?} against its own {label:?}",
             after[1].size.width
         );
-        assert!(after[2].size.width >= px(160.) && after[3].size.width >= px(160.));
         assert!(after[3].size.width > after[2].size.width, "the longer text gets the room");
+    }
+
+    /// Four long columns and a number column: the table that still scrolled
+    /// out of the frame while a long column stopped at a fixed 168 px floor
+    /// (4 x 168 + 48 = 720 against 678). With no floor above the longest
+    /// word it fits.
+    #[gpui::test]
+    fn a_table_of_four_long_columns_and_a_number_fits_its_frame(cx: &mut TestAppContext) {
+        const FRAME: f32 = 680.;
+        const TABLE: &str = "| # | Stock | What happened | Why it looks overdone | Main risk |\n|---|---|---|---|---|\n| 1 | A maker of gas turbines and power grid equipment | About a third below its July high after a weak month | It raised its forecast three times this year and orders rose strongly while the backlog grew, and it trades below its average of the past year | Still not cheap and much of its cash comes from customer down payments |";
+
+        let mut nowrap = StyleRefinement::default();
+        nowrap.text.white_space = Some(gpui::WhiteSpace::Nowrap);
+        let natural =
+            draw_scroll_table(cx, TABLE, 5, FRAME, TextViewStyle::default().table_cell(nowrap));
+        assert!(
+            natural[1..].iter().all(|cell| cell.size.width > px(168.)),
+            "the test's table: four columns each wider than the old floor, got {natural:?}"
+        );
+
+        let before = draw_scroll_table(cx, TABLE, 5, FRAME, TextViewStyle::default());
+        assert!(
+            before[4].right() > before[0].left() + px(FRAME),
+            "the content-scaled floors should overflow, got {before:?}"
+        );
+
+        let after =
+            draw_scroll_table(cx, TABLE, 5, FRAME, TextViewStyle::default().table_fit(px(160.)));
+        assert!(
+            after[4].right() <= after[0].left() + px(FRAME),
+            "the table should fit its frame, got {after:?}"
+        );
+        // The longest text keeps the most room, and nothing is crushed
+        // under the narrowest a column is ever drawn.
+        assert!(after[3].size.width > after[1].size.width);
+        assert!(after.iter().all(|cell| cell.size.width >= px(48.)));
     }
 
     #[gpui::test]
@@ -882,7 +917,7 @@ mod tests {
         const FRAME: f32 = 680.;
         const EIGHT: &str = "| a | b | c | d | e | f | g | h |\n|---|---|---|---|---|---|---|---|\n| one two three | one two three | one two three | one two three | one two three | one two three | one two three | one two three |";
         const TWELVE: &str = "| a | b | c | d | e | f | g | h | i | j | k | l |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n| one two three | one two three | one two three | one two three | one two three | one two three | one two three | one two three | one two three | one two three | one two three | one two three |";
-        let floor = || TextViewStyle::default().table_column_floor(px(160.));
+        let fit = || TextViewStyle::default().table_fit(px(160.));
 
         let mut nowrap = StyleRefinement::default();
         nowrap.text.white_space = Some(gpui::WhiteSpace::Nowrap);
@@ -891,7 +926,7 @@ mod tests {
         let column = natural[0].size.width;
         assert!(
             column > px(FRAME / 8.) && column <= px(160.),
-            "the test's table: eight columns under the floor that do not fit side by side, got {column:?}"
+            "the test's table: eight columns kept whole that do not fit side by side, got {column:?}"
         );
 
         // The longest word's own column, which is as far as a column wraps.
@@ -913,13 +948,13 @@ mod tests {
         );
 
         // Eight wrap and the table fits, no column under its longest word.
-        let eight = draw_scroll_table(cx, EIGHT, 8, FRAME, floor());
+        let eight = draw_scroll_table(cx, EIGHT, 8, FRAME, fit());
         assert!(eight[7].right() <= eight[0].left() + px(FRAME), "got {eight:?}");
         assert!(eight.iter().all(|cell| cell.size.width >= word && cell.size.width < column));
 
         // Twelve stop at their longest word (with the rule a column draws
         // on its right and the pixel of slack) and the table scrolls.
-        let twelve = draw_scroll_table(cx, TWELVE, 12, FRAME, floor());
+        let twelve = draw_scroll_table(cx, TWELVE, 12, FRAME, fit());
         assert!(twelve[11].right() > twelve[0].left() + px(FRAME), "got {twelve:?}");
         assert!(
             twelve.iter().all(|cell| cell.size.width >= word && cell.size.width <= word + px(2.5)),

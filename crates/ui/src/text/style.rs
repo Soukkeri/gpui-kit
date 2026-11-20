@@ -52,19 +52,20 @@ pub struct TextViewStyle {
     pub table_header: bool,
     /// Draw a rule between table columns, default is `true`.
     pub table_column_rules: bool,
-    /// With the scroll table layout, the width a long column is squeezed to
-    /// (its text wrapping) before the table scrolls. Default is `None`: a
-    /// floor scaled to each column's content (the width at which its text
-    /// wraps to two lines, between 160 and 480 px), which makes a table with
-    /// one long text column scroll in any frame narrower than its floors.
+    /// With the scroll table layout, fit the table to its frame as a browser
+    /// lays one out, and keep columns up to this width whole for as long as
+    /// the wider ones can give. Default is `None`: a column stops at a floor
+    /// scaled to its content (the width at which its text wraps to two
+    /// lines, between 160 and 480 px), which makes a table with one long
+    /// text column scroll in any frame narrower than its floors.
     ///
-    /// With a floor set the table fits the frame for as long as it can:
-    /// columns wider than the floor give way first and wrap, in proportion
-    /// to their content and never below the floor; only when all of them
-    /// stand at it do the columns at or under the floor wrap too, down to
-    /// half of it; below that the table scrolls. A short label column so
-    /// stays whole beside a long text column.
-    pub table_column_floor: Option<AbsoluteLength>,
+    /// Set, every column may wrap down to its longest word, so the table
+    /// fits any frame that can hold one word a line. Columns wider than
+    /// this give way first, each by the room it has over its longest word;
+    /// only when none of them can give more do the columns up to this width
+    /// wrap too. A short label column so stays whole beside a long text
+    /// column, and the table scrolls only when nothing is left to give.
+    pub table_fit: Option<AbsoluteLength>,
     /// The highlight style for inline code.
     ///
     /// Default is [`HighlightStyle::default()`], the `background_color` will
@@ -121,7 +122,7 @@ impl PartialEq for TextViewStyle {
             && self.table_cell == other.table_cell
             && self.table_header == other.table_header
             && self.table_column_rules == other.table_column_rules
-            && self.table_column_floor == other.table_column_floor
+            && self.table_fit == other.table_fit
             && self.inline_code == other.inline_code
             && self.inline_code_font_family == other.inline_code_font_family
             && self.inline_code_chip == other.inline_code_chip
@@ -144,7 +145,7 @@ impl Default for TextViewStyle {
             table_cell: StyleRefinement::default(),
             table_header: false,
             table_column_rules: true,
-            table_column_floor: None,
+            table_fit: None,
             inline_code: HighlightStyle::default(),
             inline_code_font_family: None,
             inline_code_chip: None,
@@ -246,12 +247,12 @@ impl TextViewStyle {
         self
     }
 
-    /// With the scroll table layout, fit the frame before scrolling: long
-    /// columns wrap down to `floor` first, then the short ones down to half
-    /// of it, and only then does the table scroll. Default is a floor scaled
-    /// to each column's content, up to 480 px.
-    pub fn table_column_floor(mut self, floor: impl Into<AbsoluteLength>) -> Self {
-        self.table_column_floor = Some(floor.into());
+    /// With the scroll table layout, fit the frame before scrolling: columns
+    /// wider than `keep_whole` wrap first, down to their longest word, then
+    /// the narrower ones, and only then does the table scroll. Default is a
+    /// floor scaled to each column's content, up to 480 px.
+    pub fn table_fit(mut self, keep_whole: impl Into<AbsoluteLength>) -> Self {
+        self.table_fit = Some(keep_whole.into());
         self
     }
 
@@ -307,12 +308,12 @@ mod tests {
     }
 
     #[test]
-    fn table_column_floor_is_unset_by_default_and_takes_part_in_the_fingerprint() {
+    fn table_fit_is_unset_by_default_and_takes_part_in_the_fingerprint() {
         let base = TextViewStyle::default();
-        assert_eq!(base.table_column_floor, None, "the content-scaled floors unless asked");
-        assert!(base != base.clone().table_column_floor(rems(10.)));
+        assert_eq!(base.table_fit, None, "the content-scaled floors unless asked");
+        assert!(base != base.clone().table_fit(rems(10.)));
         assert!(
-            base.clone().table_column_floor(rems(10.)) != base.clone().table_column_floor(rems(8.))
+            base.clone().table_fit(rems(10.)) != base.clone().table_fit(rems(8.))
         );
     }
 

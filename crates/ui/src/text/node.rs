@@ -1448,6 +1448,12 @@ struct ColumnFit {
 /// the columns up to `keep_whole` wide, which then wrap too. So a short
 /// label column stays whole beside a long text column.
 ///
+/// A word wider than `keep_whole` does not set its column's floor: the
+/// floor stops at `keep_whole` and the word breaks at the line's end (the
+/// line wrapper breaks inside a word that has no break of its own to offer).
+/// A URL in a cell otherwise held its column at the URL's whole width, and
+/// a table with a link column scrolled in every frame.
+///
 /// Nowrap cells never shrink below their single-line content: their floor
 /// is the content width itself.
 fn column_fits(
@@ -1457,6 +1463,9 @@ fn column_fits(
     nowrap: bool,
 ) -> Vec<ColumnFit> {
     const CELL_WRAP_MAX_LINES: f32 = 2.0;
+    // The narrowest a column is measured (`render_scroll_table`), so the
+    // narrowest floor there is.
+    const CELL_MIN_PX: f32 = 48.0;
     const CELL_WRAP_MIN_PX: f32 = 160.0;
     const CELL_WRAP_MAX_PX: f32 = 480.0;
     // Large enough that a short column's share of the squeeze stays far
@@ -1471,7 +1480,10 @@ fn column_fits(
         .map(|(ix, &w)| match keep_whole {
             _ if nowrap => ColumnFit { min_w: w, shrink: 1. },
             Some(keep_whole) => {
-                let min_w = col_word_w.get(ix).map_or(w, |word_w| w.min(*word_w));
+                let min_w = col_word_w
+                    .get(ix)
+                    .map_or(w, |word_w| w.min(*word_w))
+                    .min(keep_whole.max(CELL_MIN_PX));
                 ColumnFit {
                     min_w,
                     shrink: if w > keep_whole {
@@ -2404,6 +2416,14 @@ impl BlockNode {
         let col_fit = column_fits(&col_w, &col_word_w, keep_whole, nowrap);
         let min_total_w: f32 =
             col_fit.iter().map(|fit| fit.min_w).sum::<f32>() + TABLE_BORDER_PX;
+        // The width the table would take with every cell on one line, and
+        // what of it `TextViewStyle::table_max_width` lets it have. A table
+        // that asks for more than its frame then reaches out of the frame,
+        // centred; one that asks for less fills the frame as before.
+        let natural_w: f32 = col_w.iter().sum::<f32>() + TABLE_BORDER_PX;
+        let wide_w = style
+            .table_max_width
+            .map(|max| natural_w.min(f32::from(max.to_pixels(window.rem_size()))));
 
         let table_scroll_key = if let Some(span) = table.span {
             SharedString::from(format!(
@@ -2468,10 +2488,22 @@ impl BlockNode {
             rows.push(table_row(row_ix, row_count, cells, style, cx));
         }
 
+        // The table's own box. As wide as the frame, or with
+        // `table_max_width` as wide as the table asks for up to that: a
+        // child that does not shrink, in a row that centres it, hangs out of
+        // a narrower frame by the same amount on both sides.
+        let table_box = div()
+            .relative()
+            .min_w_full()
+            .when_some(wide_w, |this, wide_w| this.flex_none().w(px(wide_w)))
+            .when(wide_w.is_none(), |this| this.w_full());
+
         div()
             .when(!options.is_last, |this| this.pb(rems(1.)))
             .w_full()
-            .child(
+            .flex()
+            .justify_center()
+            .child(table_box.child(
                 // Scroll viewport: clips and scrolls horizontally (overflow-x
                 // is handled by `ScrollableMask`, so vertical wheel events keep
                 // bubbling to the parent TextView). No border — the frame is on
@@ -2497,12 +2529,14 @@ impl BlockNode {
             // A table that scrolls says so: without a bar its right side is
             // out of sight with nothing on screen to tell a mouse user it is
             // there, or how to reach it without a sideways wheel. Over the
-            // viewport's own bounds (the handle's), shown while the pointer
-            // is on the table, and nothing at all for a table that fits.
+            // viewport's own bounds (the handle's), ALWAYS drawn while the
+            // table scrolls (a bar that showed only under the pointer left a
+            // cut-off table looking simply cut off), and nothing at all for
+            // a table that fits.
             .child(
                 Scrollbar::horizontal(&scroll_handle)
                     .id(("table-scrollbar", options.ix))
-                    .mode(ScrollbarMode::Hover),
+                    .mode(ScrollbarMode::Always),
             )
             // Custom actions row (e.g. copy / download) rendered below the
             // table. The hook's element spans full width; alignment is up to
@@ -2516,7 +2550,7 @@ impl BlockNode {
                     window,
                     cx,
                 ))
-            }))
+            })))
             .into_any_element()
     }
 
@@ -2774,6 +2808,12 @@ mod tests {
             fits.iter().map(|fit| fit.min_w).collect::<Vec<_>>(),
             vec![48., 90., 160., 70., 110.]
         );
+        // A word wider than `keep_whole` (a URL) does not hold its column
+        // open: the floor stops at `keep_whole` and the word breaks.
+        let link = column_fits(&[80., 900.], &[80., 900.], Some(160.), false);
+        assert_eq!(link[1].min_w, 160.);
+        assert_eq!(link[0].min_w, 80., "a word under it is still the floor");
+
         // Up to `keep_whole` wide: whole until the long ones are frozen.
         assert!(fits[..3].iter().all(|fit| fit.shrink == 1.));
         // Wider: well before the short ones, and by the room each has over

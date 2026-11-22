@@ -962,9 +962,144 @@ mod tests {
         );
     }
 
-    /// A table that still scrolls shows a bar under the pointer, and the bar
-    /// works: without one the columns past the frame were out of reach of a
-    /// mouse with no sideways wheel, and nothing said they were there.
+    /// A link column: seven columns, the last a URL. The URL is one word
+    /// with no break of its own, so with the longest word as the floor it
+    /// held its column at its whole width and the table scrolled in any
+    /// frame. A word wider than the kept-whole width breaks at the line's
+    /// end instead, and the table fits.
+    const LINK_TABLE: &str = "| Brand | Model | Price | Store | Normal | Deal | Source |
+|---|---|---|---|---|---|---|
+| Apple | iPhone 18 Pro Max 256 GB | 1549 | Gigantti, Power, Verkkokauppa | 1659 on the 30 day low | Yes, modest | https://www.example-price-comparison.fi/phones/apple-iphone-18-pro-max-256gb-black-titanium?sort=price&history=30d |";
+
+    #[gpui::test]
+    fn a_word_wider_than_the_kept_whole_width_breaks_and_the_table_fits(
+        cx: &mut TestAppContext,
+    ) {
+        const FRAME: f32 = 1000.;
+        let fit = || TextViewStyle::default().table_fit(px(160.));
+
+        // The test's table: the URL alone is wider than the frame.
+        let mut nowrap = StyleRefinement::default();
+        nowrap.text.white_space = Some(gpui::WhiteSpace::Nowrap);
+        let natural = draw_scroll_table(
+            cx,
+            LINK_TABLE,
+            7,
+            FRAME,
+            TextViewStyle::default().table_cell(nowrap),
+        );
+        assert!(
+            natural[6].size.width > px(600.),
+            "the URL should be far wider than the kept-whole width, got {natural:?}"
+        );
+        let one_line = natural[6].size.height;
+
+        let cells = draw_scroll_table(cx, LINK_TABLE, 7, FRAME, fit());
+        assert!(
+            cells[6].right() <= cells[0].left() + px(FRAME),
+            "the table should fit its frame, got {cells:?}"
+        );
+        // It wrapped, it was not clipped: the row grew to hold the URL's lines.
+        assert!(
+            cells[6].size.height > one_line * 1.5,
+            "the URL should run over several lines: {:?} against one line's {one_line:?}",
+            cells[6].size.height
+        );
+        // The ordinary columns are not crushed for it.
+        assert!(cells[0].size.width >= natural[0].size.width - px(1.), "got {cells:?}");
+    }
+
+    /// Draw `markdown` in the scroll layout in a 680 px frame that has 200 px
+    /// of empty page on each side, and return the frame's left edge and the
+    /// bounds of the first body row's cells.
+    fn draw_table_in_a_page(
+        cx: &mut TestAppContext,
+        markdown: &'static str,
+        columns: usize,
+        style: TextViewStyle,
+    ) -> (Pixels, Vec<Bounds<Pixels>>) {
+        struct PageRoot {
+            markdown: &'static str,
+            style: TextViewStyle,
+        }
+
+        impl Render for PageRoot {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                let mut table_style = StyleRefinement::default();
+                table_style.overflow.x = Some(Overflow::Scroll);
+                div().w(px(1080.)).flex().justify_center().child(
+                    div().w(px(680.)).child(
+                        TextView::markdown("page-table", self.markdown)
+                            .style(self.style.clone().table(table_style)),
+                    ),
+                )
+            }
+        }
+
+        cx.update(crate::init);
+        let (_, cx) = cx.add_window_view(move |_, _| PageRoot { markdown, style });
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let cells = (0..columns)
+            .map(|ix| {
+                cx.debug_bounds(Box::leak(format!("table-cell-1-{ix}").into_boxed_str()))
+                    .expect("every cell of the first body row should be painted")
+            })
+            .collect();
+        (px(200.), cells)
+    }
+
+    /// A table that needs more room than its frame takes it from the page
+    /// beside the frame, up to `table_max_width`, centred; a table that fits
+    /// the frame is where it was.
+    #[gpui::test]
+    fn a_wide_table_reaches_out_of_its_frame_up_to_table_max_width(cx: &mut TestAppContext) {
+        const FRAME: f32 = 680.;
+        let fit = || TextViewStyle::default().table_fit(px(160.));
+        let wide = || fit().table_max_width(px(1000.));
+
+        // The control: without the option the table is its frame's width.
+        let (frame, held) = draw_table_in_a_page(cx, LINK_TABLE, 7, fit());
+        assert!(
+            held[0].left() >= frame && held[6].right() <= frame + px(FRAME),
+            "without table_max_width the table stays in its frame, got {held:?}"
+        );
+
+        let (frame, cells) = draw_table_in_a_page(cx, LINK_TABLE, 7, wide());
+        let (left, right) = (cells[0].left(), cells[6].right());
+        assert!(
+            right - left > px(FRAME + 200.) && right - left <= px(1000.),
+            "the table should take the wider box, got {left:?}..{right:?}"
+        );
+        // Centred on the frame: it hangs out by the same amount each side.
+        let (out_left, out_right) = (frame - left, right - (frame + px(FRAME)));
+        assert!(
+            (out_left - out_right).abs() <= px(3.),
+            "the table should be centred on its frame: {out_left:?} left, {out_right:?} right"
+        );
+        // With the room, the cells are wider than they were in the frame.
+        assert!(cells[1].size.width > held[1].size.width, "{cells:?} against {held:?}");
+
+        // A table that fits its frame is not moved or widened by the option.
+        const SMALL: &str = "| a | b |
+|---|---|
+| one | two |";
+        let (_, plain) = draw_table_in_a_page(cx, SMALL, 2, fit());
+        let (frame, small) = draw_table_in_a_page(cx, SMALL, 2, wide());
+        assert_eq!(small, plain, "a table that fits is untouched");
+        assert!(small[0].left() >= frame && small[1].right() <= frame + px(FRAME));
+    }
+
+    /// A table that still scrolls shows a bar, and the bar works: without
+    /// one the columns past the frame were out of reach of a mouse with no
+    /// sideways wheel, and nothing said they were there.
     #[gpui::test]
     fn a_scrolling_table_has_a_bar_that_scrolls_it(cx: &mut TestAppContext) {
         struct WideTableRoot;

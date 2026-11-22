@@ -65,7 +65,23 @@ pub struct TextViewStyle {
     /// only when none of them can give more do the columns up to this width
     /// wrap too. A short label column so stays whole beside a long text
     /// column, and the table scrolls only when nothing is left to give.
+    ///
+    /// A word WIDER than this width (a URL, a path, a hash) does not hold
+    /// its column open: the column's floor stops at this width and the word
+    /// breaks where the line ends, as `overflow-wrap: anywhere` breaks it.
     pub table_fit: Option<AbsoluteLength>,
+    /// With the scroll table layout, the widest a table is drawn, which may
+    /// be WIDER than the frame the text is laid out in. Default is `None`:
+    /// a table is as wide as its frame.
+    ///
+    /// Set, a table whose content needs more room than the frame takes up
+    /// to this width, centred on the frame, so it reaches out of it by the
+    /// same amount on both sides; a table that fits the frame is untouched.
+    /// For a reading column narrower than its page, where a wide table has
+    /// empty page beside it and would otherwise wrap every cell to a few
+    /// words a line or scroll. The caller owns the room: nothing here knows
+    /// what is beside the frame, so pass no more than is free there.
+    pub table_max_width: Option<AbsoluteLength>,
     /// The highlight style for inline code.
     ///
     /// Default is [`HighlightStyle::default()`], the `background_color` will
@@ -123,6 +139,7 @@ impl PartialEq for TextViewStyle {
             && self.table_header == other.table_header
             && self.table_column_rules == other.table_column_rules
             && self.table_fit == other.table_fit
+            && self.table_max_width == other.table_max_width
             && self.inline_code == other.inline_code
             && self.inline_code_font_family == other.inline_code_font_family
             && self.inline_code_chip == other.inline_code_chip
@@ -146,6 +163,7 @@ impl Default for TextViewStyle {
             table_header: false,
             table_column_rules: true,
             table_fit: None,
+            table_max_width: None,
             inline_code: HighlightStyle::default(),
             inline_code_font_family: None,
             inline_code_chip: None,
@@ -256,6 +274,14 @@ impl TextViewStyle {
         self
     }
 
+    /// With the scroll table layout, let a table that needs more room than
+    /// its frame grow up to `max_width`, centred on the frame. Default is
+    /// the frame's own width.
+    pub fn table_max_width(mut self, max_width: impl Into<AbsoluteLength>) -> Self {
+        self.table_max_width = Some(max_width.into());
+        self
+    }
+
     /// Returns the [`HighlightStyle`] to use for inline code,
     /// fallback `background_color` to `cx.theme().accent`, if it is `None`.
     pub(crate) fn inline_code_highlight(&self, cx: &App) -> HighlightStyle {
@@ -314,6 +340,16 @@ mod tests {
         assert!(base != base.clone().table_fit(rems(10.)));
         assert!(
             base.clone().table_fit(rems(10.)) != base.clone().table_fit(rems(8.))
+        );
+    }
+
+    #[test]
+    fn table_max_width_is_unset_by_default_and_takes_part_in_the_fingerprint() {
+        let base = TextViewStyle::default();
+        assert_eq!(base.table_max_width, None, "a table is as wide as its frame unless asked");
+        assert!(base != base.clone().table_max_width(px(1000.)));
+        assert!(
+            base.clone().table_max_width(px(1000.)) != base.clone().table_max_width(px(900.))
         );
     }
 
